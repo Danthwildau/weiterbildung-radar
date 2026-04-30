@@ -424,7 +424,7 @@ def phase_1(offers, params):
         top_n["_Quelle"]  = top_n.apply(fmt_source, axis=1)
         top_n["_Preis"]   = top_n.apply(fmt_price, axis=1)
         top_n["_Link"]    = top_n.apply(fmt_link, axis=1)
-        top_n["_Umfang"]  = top_n["umfang"].fillna("").apply(
+        top_n["_Umfang"]  = top_n.get("umfang", pd.Series("", index=top_n.index)).fillna("").apply(
             lambda x: x if x else "k.A.")
 
         # Show table with deselect checkboxes
