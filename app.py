@@ -246,22 +246,43 @@ def load_kgs():
 
 def match_offers(offers, user_text, selected_cats, kg, n_per_source=30):
     """
-    Return up to n_per_source matches from each source (hochundweit + meinnow),
-    so price statistics are not dominated by the larger meinnow dataset.
+    Score courses by relevance to user_text.
+    Title matches are weighted 5× more than description matches.
+    Description matches are length-normalised to prevent MN's long
+    keyword-stuffed titles from dominating over concise HW titles.
+    Returns up to n_per_source from each source, sorted by score.
     """
     user_words = tokenize(user_text)
     user_stems = {w[:5] for w in user_words if len(w) >= 4}
     scores = []
     for _, row in offers.iterrows():
         s = 0.0
-        rt = (str(row.get("title",""))+" "+str(row.get("description",""))).lower()
-        rw = tokenize(rt); rs = {w[:5] for w in rw if len(w) >= 4}
-        s += len(user_words & rw) * 2.0
-        s += len((user_stems & rs) - user_words) * 1.0
+        title = str(row.get("title","")).lower()
+        desc  = str(row.get("description","")).lower()
+        tw = tokenize(title); dw = tokenize(desc)
+        ts = {w[:5] for w in tw if len(w)>=4}
+        ds = {w[:5] for w in dw if len(w)>=4}
+        desc_len = max(len(dw), 1)
+
+        # Title match: high fixed weight per match
+        t_exact = user_words & tw
+        t_stem  = (user_stems & ts) - user_words
+        s += len(t_exact) * 5.0
+        s += len(t_stem)  * 2.0
+
+        # Description: log-normalised to prevent length advantage
+        d_exact = user_words & dw
+        d_stem  = (user_stems & ds) - user_words - t_exact
+        if d_exact:
+            s += math.log(1 + len(d_exact)) / math.log(1 + desc_len) * 8
+        if d_stem:
+            s += math.log(1 + len(d_stem))  / math.log(1 + desc_len) * 3
+
         for cat in selected_cats:
-            if row.get(cat, False): s += 3.0
-        if kg and str(row.get("knowledgeGroup","")) == kg: s += 2.0
+            if row.get(cat, False): s += 2.0
+        if kg and str(row.get("knowledgeGroup","")) == kg: s += 1.5
         scores.append(s)
+
     o2 = offers.copy(); o2["_score"] = scores
     o2 = o2[o2["_score"] > 0].sort_values("_score", ascending=False)
     hw = o2[o2["source"] == "hochundweit"].head(n_per_source)
@@ -269,8 +290,9 @@ def match_offers(offers, user_text, selected_cats, kg, n_per_source=30):
     return pd.concat([hw, mn]).sort_values("_score", ascending=False).reset_index(drop=True)
 
 def score_badge(score, label):
-    c = "#0f6e56" if score<=4 else "#854f0b" if score<=7 else "#9b1c1c"
-    bg= "#e1f5ee" if score<=4 else "#faeeda" if score<=7 else "#fee2e2"
+    # 10 = green (good), 1 = red (bad)
+    c = "#9b1c1c" if score<=3 else "#854f0b" if score<=6 else "#0f6e56"
+    bg= "#fee2e2" if score<=3 else "#faeeda" if score<=6 else "#e1f5ee"
     st.markdown(
         f'<div style="display:inline-flex;align-items:center;gap:12px;'
         f'background:{bg};border-radius:10px;padding:12px 20px;margin:6px 0">'
@@ -279,12 +301,13 @@ def score_badge(score, label):
         unsafe_allow_html=True)
 
 def angebots_score(n):
-    if n==0:   return 1,"Kaum Angebot vorhanden — Lücke im Markt."
-    if n<=3:   return 3,"Sehr geringes Angebot — gute Marktchance."
-    if n<=8:   return 5,"Moderates Angebot — Differenzierung empfehlenswert."
-    if n<=20:  return 7,"Angebot vorhanden — klares Profil nötig."
-    if n<=40:  return 9,"Starkes Angebot — Nische oder USP wichtig."
-    return 10,"Sehr gesättigter Markt — Positionierung entscheidend."
+    # 10 = best (little competition), 1 = worst (very saturated)
+    if n==0:   return 10,"Kaum Angebot vorhanden — Lücke im Markt."
+    if n<=3:   return 9,"Sehr geringes Angebot — gute Marktchance."
+    if n<=8:   return 7,"Moderates Angebot — Differenzierung empfehlenswert."
+    if n<=20:  return 5,"Angebot vorhanden — klares Profil nötig."
+    if n<=40:  return 3,"Starkes Angebot — Nische oder USP wichtig."
+    return 1,"Sehr gesättigter Markt — Positionierung entscheidend."
 
 def nachfrage_score(demand, kldb_ids, region_names):
     """
@@ -393,195 +416,193 @@ def phase_1(offers, params):
         matched = match_offers(offers, params["user_text"],
                                params["selected_cats"], params["kg"])
 
-    score, score_text = angebots_score(len(matched))
+    # Split by purpose:
+    # Wettbewerb: same-format courses (Präsenz/Hybrid/Berufsbegleitend) = real competition
+    # Preisreferenz: all formats including online = broader price benchmark
+    PHYSICAL_FORMATS = ["Berufsbegleitender","Präsenz","Blockkurs","Hybrid","Wochenend",
+                        "Seminar","Praxistraining","Teilzeit","Vollzeit","Studium"]
+
+    def is_physical(fmt):
+        return any(f in str(fmt) for f in PHYSICAL_FORMATS)
+
+    matched_competition = matched[matched["format"].apply(is_physical)].reset_index(drop=True)
+    matched_price       = matched.reset_index(drop=True)  # all formats
+
+    n_comp  = len(matched_competition)
+    n_total = len(matched)
+    score, score_text = angebots_score(n_comp)
+
     col_sc, col_info = st.columns([1,3])
     with col_sc:
         score_badge(score, score_text)
     with col_info:
-        st.write(f"{len(matched)} ähnliche Angebote gefunden "
-                 f"(je bis zu 30 aus Hochschule und Weiterbildung). "
-                 f"Score 1 = wenig Wettbewerb, Score 10 = stark gesättigter Markt.")
+        st.write(
+            f"**{n_comp}** inhaltlich ähnliche Präsenz/Hybrid-Kurse gefunden "
+            f"(von {n_total} Treffern gesamt inkl. Online). "
+            f"Score 10 = wenig Wettbewerb, Score 1 = stark gesättigter Markt."
+        )
 
     if "deselected" not in st.session_state:
         st.session_state.deselected = set()
 
-    # ── Tab controls ────────────────────────────────────────────────
-    st.markdown("""
-<div style="display:flex;gap:8px;margin:12px 0 4px 0;font-size:13px">
-  <span style="background:#185fa5;color:#fff;padding:4px 14px;border-radius:20px;font-weight:500">
-    Tabs wählen:</span>
-  <span style="color:#555">Lokal = TH Wildau Region &nbsp;·&nbsp;
-    Regional = Berlin &amp; Brandenburg &nbsp;·&nbsp; National = ganz Deutschland</span>
-</div>""", unsafe_allow_html=True)
+    st.markdown("""<div style="height:8px"></div>""", unsafe_allow_html=True)
 
-    tab_local, tab_regional, tab_national = st.tabs([
-        "Lokal — TH Wildau Region",
-        "Regional — Berlin & Brandenburg",
-        "National",
+    subtab_wett, subtab_preis = st.tabs([
+        f"Wettbewerbs-Angebote ({n_comp} Präsenz/Hybrid)",
+        f"Preisreferenz ({n_total} inkl. Online)",
     ])
 
-    ctrl1, ctrl2 = st.columns([1, 4])
+    ctrl1, _ = st.columns([1,4])
     n_display = ctrl1.selectbox("Angebote pro Seite", [10, 20], index=0, key="n_display")
 
-    def show_tab(geo_filter, geo_label, tab_key):
-        geo_courses = matched[matched["geo_tier"].isin(geo_filter)]
-        online      = matched[matched["format"].str.contains(
-            "Digital|Online|Combined|Blended|Fern", case=False, na=False)]
-        combined    = pd.concat([geo_courses, online]).drop_duplicates(subset=["id"]).reset_index(drop=True)
+    def show_offers(df_src, tab_key, show_price_stats=True):
+        if df_src.empty:
+            st.info("Keine passenden Angebote für diese Kombination."); return
 
-        n_total = len(combined)
-        st.caption(f"{n_total} Angebote "
-                   f"({len(geo_courses)} {geo_label} + {len(online)} online/flexibel)")
+        # Filter out deselected
+        active = df_src[~df_src["id"].astype(str).isin(st.session_state.deselected)].reset_index(drop=True)
+        n_excl = len(df_src) - len(active)
+        if n_excl:
+            st.caption(f"{n_excl} Angebot(e) ausgeblendet.")
 
-        if combined.empty:
-            st.info("Keine passenden Angebote für diese Region."); return
+        # Pagination
+        n_pages  = max(1, math.ceil(len(df_src) / n_display))
+        pk       = f"page_{tab_key}"
+        if pk not in st.session_state: st.session_state[pk] = 0
+        page     = max(0, min(st.session_state[pk], n_pages-1))
+        page_rows = df_src.iloc[page*n_display:(page+1)*n_display].copy()
 
-        # ── Pagination ────────────────────────────────────────────
-        n_pages = max(1, math.ceil(n_total / n_display))
-        page_key = f"page_{tab_key}"
-        if page_key not in st.session_state:
-            st.session_state[page_key] = 0
-        page = st.session_state[page_key]
-        page = max(0, min(page, n_pages - 1))
-
-        page_start = page * n_display
-        page_end   = page_start + n_display
-        page_rows  = combined.iloc[page_start:page_end].copy()
-
-        def fmt_price(row):
-            pb = str(row.get("price_band",""))
-            if pb in PREIS_LABELS: return PREIS_LABELS[pb]
-            if pd.notna(row.get("price")) and row["price"] > 0:
-                return f"{row['price']:,.0f} EUR"
-            return "k.A."
-
-        def fmt_link(row):
-            url = str(row.get("url",""))
-            if url.startswith("http"):
-                label = "Kurs" if "hochschulweiterbildung" in url else "Anbieter"
-                return f'<a href="{url}" target="_blank">{label}&nbsp;&rarr;</a>'
-            return "—"
-
-        def src_badge(src):
-            if src == "hochundweit":
-                return '<span style="background:#dceefb;color:#0c3a6b;padding:1px 7px;border-radius:4px;font-size:11px;white-space:nowrap">Hochschule</span>'
-            return '<span style="background:#faeeda;color:#6b3000;padding:1px 7px;border-radius:4px;font-size:11px;white-space:nowrap">Weiterbildung</span>'
-
-        page_rows["_Quelle"] = page_rows["source"].apply(src_badge)
-        page_rows["_Preis"]  = page_rows.apply(fmt_price, axis=1)
-        page_rows["_Link"]   = page_rows.apply(fmt_link, axis=1)
-        page_rows["_Umfang"] = page_rows.get("umfang", pd.Series("", index=page_rows.index)).fillna("").apply(
-            lambda x: x if x else "k.A.")
-
-        # ── Table with checkboxes ─────────────────────────────────
-        st.markdown("**Vergleichsangebote** — Häkchen entfernen, um Angebote aus der Statistik auszuschließen:")
-
-        # Render as styled HTML table with a checkbox column
-        # We use st.checkbox per row (Streamlit native, reliable)
-        header = (
-            '<table style="width:100%;border-collapse:collapse;font-size:13px">' +
-            '<thead><tr style="background:#f0f4f8;text-align:left">' +
-            '<th style="padding:6px 8px;width:28px"></th>' +
-            '<th style="padding:6px 8px">Titel</th>' +
-            '<th style="padding:6px 8px">Anbieter</th>' +
-            '<th style="padding:6px 8px">Quelle</th>' +
-            '<th style="padding:6px 8px">Format</th>' +
-            '<th style="padding:6px 8px">Umfang</th>' +
-            '<th style="padding:6px 8px">Preis</th>' +
-            '<th style="padding:6px 8px">Link</th>' +
-            '</tr></thead><tbody>'
-        )
-        st.markdown(header, unsafe_allow_html=True)
+        # Table header
+        st.markdown(
+            '<div style="display:grid;grid-template-columns:90px 1fr 140px 80px 90px 80px 70px;'
+            'gap:0;background:#f0f4f8;padding:5px 0;font-size:12px;font-weight:600;'
+            'border-bottom:2px solid #ccc;margin-bottom:2px">'
+            '<span style="padding:0 6px">Quelle</span>'
+            '<span style="padding:0 6px">Titel</span>'
+            '<span style="padding:0 6px">Anbieter</span>'
+            '<span style="padding:0 6px">Umfang</span>'
+            '<span style="padding:0 6px">Preis</span>'
+            '<span style="padding:0 6px">Link</span>'
+            '<span style="padding:0 6px"></span>'
+            '</div>',
+            unsafe_allow_html=True)
 
         changed = False
         for _, row in page_rows.iterrows():
             rid      = str(row["id"])
             is_active = rid not in st.session_state.deselected
-            row_bg   = "" if is_active else "background:#f8f0f0;"
-            st.markdown(
-                f'<tr style="{row_bg}border-bottom:1px solid #e8e8e8">' +
-                f'<td></td>' +
-                f'<td style="padding:5px 8px">{str(row["title"])[:55]}</td>' +
-                f'<td style="padding:5px 8px;color:#555">{str(row.get("provider",""))[:30]}</td>' +
-                f'<td style="padding:5px 8px">{row["_Quelle"]}</td>' +
-                f'<td style="padding:5px 8px;color:#555">{str(row.get("format",""))[:20]}</td>' +
-                f'<td style="padding:5px 8px;color:#555">{row["_Umfang"]}</td>' +
-                f'<td style="padding:5px 8px;font-weight:500">{row["_Preis"]}</td>' +
-                f'<td style="padding:5px 8px">{row["_Link"]}</td>' +
-                '</tr>',
-                unsafe_allow_html=True)
-            chk = st.checkbox("Einbeziehen", value=is_active,
-                              key=f"chk_{tab_key}_{rid}", label_visibility="collapsed")
-            if chk != is_active:
-                if chk:
-                    st.session_state.deselected.discard(rid)
-                else:
-                    st.session_state.deselected.add(rid)
-                changed = True
 
-        st.markdown("</tbody></table>", unsafe_allow_html=True)
+            pb = str(row.get("price_band",""))
+            price_str = (PREIS_LABELS.get(pb) if pb in PREIS_LABELS
+                         else (f"{row['price']:,.0f} EUR" if pd.notna(row.get("price")) and row["price"]>0 else "k.A."))
+            url   = str(row.get("url",""))
+            link  = (f'<a href="{url}" target="_blank">Link&nbsp;&rarr;</a>' if url.startswith("http") else "—")
+            umf   = str(row.get("umfang","") or "k.A.")
+            title = str(row.get("title",""))[:52]
+            prov  = str(row.get("provider",""))[:22]
+            src_l = row.get("source","")
+            badge = ('<span style="background:#dceefb;color:#0c3a6b;padding:1px 6px;border-radius:4px;font-size:11px">HW</span>'
+                     if src_l=="hochundweit" else
+                     '<span style="background:#faeeda;color:#6b3000;padding:1px 6px;border-radius:4px;font-size:11px">MN</span>')
+            row_bg = "#fafafa" if is_active else "#fff0f0"
+
+            st.markdown(
+                f'<div style="display:grid;grid-template-columns:90px 1fr 140px 80px 90px 80px 70px;' +
+                f'gap:0;background:{row_bg};padding:4px 0;font-size:13px;' +
+                f'border-bottom:1px solid #e8e8e8;align-items:center">' +
+                f'<span style="padding:0 6px">{badge}</span>' +
+                f'<span style="padding:0 6px" title="{str(row.get("title",""))}">{title}</span>' +
+                f'<span style="padding:0 6px;color:#555;font-size:12px">{prov}</span>' +
+                f'<span style="padding:0 6px;color:#555;font-size:12px">{umf}</span>' +
+                f'<span style="padding:0 6px;font-weight:500">{price_str}</span>' +
+                f'<span style="padding:0 6px">{link}</span>' +
+                f'<span style="padding:0 6px"></span>' +
+                '</div>',
+                unsafe_allow_html=True)
+
+            btn_label = "Ausblenden" if is_active else "Wieder anzeigen"
+            if st.button(btn_label, key=f"btn_{tab_key}_{rid}", use_container_width=False):
+                if is_active:
+                    st.session_state.deselected.add(rid)
+                else:
+                    st.session_state.deselected.discard(rid)
+                changed = True
 
         if changed:
             st.rerun()
 
-        # ── Pagination controls ───────────────────────────────────
+        # Pagination controls
         if n_pages > 1:
             pc1, pc2, pc3 = st.columns([1,2,1])
             if pc1.button("← Zurück", key=f"prev_{tab_key}", disabled=page==0):
-                st.session_state[page_key] = page - 1
-                st.rerun()
-            pc2.markdown(
-                f'<div style="text-align:center;padding:6px 0;font-size:13px">' +
-                f'Seite {page+1} von {n_pages}</div>', unsafe_allow_html=True)
+                st.session_state[pk] = page-1; st.rerun()
+            pc2.markdown(f'<div style="text-align:center;padding:6px;font-size:13px">'
+                         f'Seite {page+1} von {n_pages}</div>', unsafe_allow_html=True)
             if pc3.button("Weiter →", key=f"next_{tab_key}", disabled=page==n_pages-1):
-                st.session_state[page_key] = page + 1
-                st.rerun()
+                st.session_state[pk] = page+1; st.rerun()
 
-        # ── Price statistics (hw-only for granular data) ──────────
-        active_combined = combined[~combined["id"].astype(str).isin(st.session_state.deselected)]
-        hw_active = active_combined[
-            (active_combined["source"] == "hochundweit") &
-            active_combined["price"].notna() &
-            (active_combined["price"] > 0)
-        ]
-        mn_active = active_combined[active_combined["source"] == "meinnow"]
+        if not show_price_stats: return
 
-        n_excl = len(combined) - len(active_combined)
-        if n_excl:
-            st.caption(f"{n_excl} Angebot(e) aus der Statistik ausgeschlossen.")
+        # Price stats from active HW courses (real granular prices)
+        hw_act = active[(active["source"]=="hochundweit") &
+                        active["price"].notna() & (active["price"]>0)]
+        mn_act = active[active["source"]=="meinnow"]
 
-        if len(hw_active) >= 3:
-            st.markdown("**Preisstatistik** (Hochschulangebote mit echten Preisangaben):")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Median",    f"{hw_active['price'].median():,.0f} EUR")
-            m2.metric("25. Perz.", f"{hw_active['price'].quantile(.25):,.0f} EUR")
-            m3.metric("75. Perz.", f"{hw_active['price'].quantile(.75):,.0f} EUR")
-        elif len(mn_active) >= 3:
-            st.markdown("**Preisspanne Weiterbildungsangebote:**")
-            band_counts = mn_active["price_band"].value_counts()
-            for band, count in band_counts.items():
-                label = PREIS_LABELS.get(str(band), str(band))
-                st.caption(f"  {label}: {count} Angebot(e)")
-        else:
+        st.markdown("")
+        if len(hw_act) >= 3:
+            st.markdown("**Preisstatistik — Hochschulangebote (reale Preise):**")
+            m1,m2,m3 = st.columns(3)
+            m1.metric("Median",    f"{hw_act['price'].median():,.0f} EUR")
+            m2.metric("25. Perz.", f"{hw_act['price'].quantile(.25):,.0f} EUR")
+            m3.metric("75. Perz.", f"{hw_act['price'].quantile(.75):,.0f} EUR")
+        if len(mn_act) >= 2:
+            bands = mn_act["price_band"].value_counts()
+            band_str = "  ·  ".join(
+                f"{PREIS_LABELS.get(b,b)}: {c}" for b,c in bands.items())
+            st.caption(f"Weiterbildungsangebote (Preisbänder): {band_str}")
+        elif len(hw_act) < 3:
             st.caption("Zu wenige Preisangaben für Statistik.")
 
         # Legend
         st.markdown(
-            '<div style="margin-top:6px;font-size:12px;color:#666">' +
-            '<span style="background:#dceefb;color:#0c3a6b;padding:1px 7px;border-radius:4px">Hochschule</span> ' +
+            '<div style="margin-top:4px;font-size:12px;color:#666">' +
+            '<span style="background:#dceefb;color:#0c3a6b;padding:1px 6px;border-radius:4px">HW</span> ' +
             'hochundweit.de &nbsp;·&nbsp;' +
-            '<span style="background:#faeeda;color:#6b3000;padding:1px 7px;border-radius:4px">Weiterbildung</span> ' +
-            'mein-now.de</div>',
-            unsafe_allow_html=True)
+            '<span style="background:#faeeda;color:#6b3000;padding:1px 6px;border-radius:4px">MN</span> ' +
+            'mein-now.de</div>', unsafe_allow_html=True)
 
-    with tab_local:
-        show_tab(["wildau"], "lokale", "local")
-    with tab_regional:
-        show_tab(["wildau","berlin_bb"], "Berlin/BB", "regional")
-    with tab_national:
-        show_tab(["wildau","berlin_bb","national","national_flex"], "alle", "national")
+    with subtab_wett:
+        tab_local, tab_regional, tab_national = st.tabs([
+            "Lokal — TH Wildau",
+            "Regional — Berlin/BB",
+            "National",
+        ])
+        def geo_filter(df, tiers):
+            geo   = df[df["geo_tier"].isin(tiers)]
+            return geo.drop_duplicates(subset=["id"]).reset_index(drop=True)
 
-    return matched
+        with tab_local:
+            show_offers(geo_filter(matched_competition, ["wildau"]), "wett_local")
+        with tab_regional:
+            show_offers(geo_filter(matched_competition, ["wildau","berlin_bb"]), "wett_regional")
+        with tab_national:
+            show_offers(matched_competition, "wett_national")
+
+    with subtab_preis:
+        st.caption("Alle Formate (inkl. Online) — für Preisvergleich und Marktsättigung.")
+        tab_local2, tab_regional2, tab_national2 = st.tabs([
+            "Lokal — TH Wildau",
+            "Regional — Berlin/BB",
+            "National",
+        ])
+        with tab_local2:
+            show_offers(geo_filter(matched_price, ["wildau"]), "preis_local")
+        with tab_regional2:
+            show_offers(geo_filter(matched_price, ["wildau","berlin_bb"]), "preis_regional")
+        with tab_national2:
+            show_offers(matched_price, "preis_national")
+
+    return matched_price
 
 
 def phase_2(berufe_df, demand, params):
@@ -592,87 +613,92 @@ def phase_2(berufe_df, demand, params):
     current_input = params["user_text"]
 
     # ── Session state ────────────────────────────────────────────────
-    if "confirmed_berufe" not in st.session_state:
-        st.session_state.confirmed_berufe = set()
-    if "last_nd_input" not in st.session_state:
-        st.session_state.last_nd_input = ""
-    if "nd_suggestions" not in st.session_state:
-        st.session_state.nd_suggestions = []
+    if "confirmed_berufe"  not in st.session_state: st.session_state.confirmed_berufe  = set()
+    if "last_nd_input"     not in st.session_state: st.session_state.last_nd_input     = ""
+    if "nd_base"           not in st.session_state: st.session_state.nd_base           = []
+    if "nd_shown_count"    not in st.session_state: st.session_state.nd_shown_count    = 5
+    if "nd_pool"           not in st.session_state: st.session_state.nd_pool           = []
 
-    # Recompute base suggestions only when input text changes
+    # Recompute only when text changes
     if current_input != st.session_state.last_nd_input:
-        st.session_state.last_nd_input    = current_input
+        st.session_state.last_nd_input   = current_input
         st.session_state.confirmed_berufe = set()
-        base = match_berufe(berufe_df, current_input, n=20)
-        st.session_state.nd_suggestions   = [b["beruf_name"] for b in base]
+        st.session_state.nd_shown_count  = 5
+        base = match_berufe(berufe_df, current_input, n=30)
+        st.session_state.nd_base  = [b["beruf_name"] for b in base]
+        st.session_state.nd_pool  = st.session_state.nd_base.copy()
 
-    confirmed    = st.session_state.confirmed_berufe
-    all_shown    = set(st.session_state.nd_suggestions) | confirmed
+    confirmed = st.session_state.confirmed_berufe
 
-    # Compute fresh "next 5" suggestions from confirmed selections
+    # Expand pool when user has made selections
     if confirmed:
-        expansions = expand_berufe(berufe_df, list(confirmed), list(all_shown), n=20)
-        candidates = [e["beruf_name"] for e in expansions if e["beruf_name"] not in all_shown]
-    else:
-        candidates = [b for b in st.session_state.nd_suggestions if b not in confirmed]
+        all_known = set(st.session_state.nd_pool) | confirmed
+        expansions = expand_berufe(berufe_df, list(confirmed), list(all_known), n=30)
+        new_exp = [e["beruf_name"] for e in expansions if e["beruf_name"] not in all_known]
+        # Add new expansions to pool if not already there
+        for b in new_exp:
+            if b not in st.session_state.nd_pool:
+                st.session_state.nd_pool.append(b)
 
-    # Always show exactly 5 unselected suggestions
-    unselected_shown = [b for b in st.session_state.nd_suggestions if b not in confirmed]
-    next5 = (unselected_shown + candidates)[:5]
+    # Candidates = pool minus already confirmed, up to shown_count
+    candidates = [b for b in st.session_state.nd_pool if b not in confirmed]
+    shown      = candidates[:st.session_state.nd_shown_count]
+    has_more   = len(candidates) > st.session_state.nd_shown_count
 
     # ── Instructions ─────────────────────────────────────────────────
     st.write(
-        "Klicken Sie auf die passenden Berufsgruppen. "
-        "Ausgewählte Berufe erscheinen grün. "
-        "Es werden immer fünf neue Vorschläge angezeigt — je mehr Sie auswählen, "
-        "desto gezielter werden die Vorschläge."
+        "Klicken Sie auf die Kacheln, um Berufsgruppen als Zielgruppe auszuwählen. "
+        "Ausgewählte Kacheln erscheinen grün. Klicken Sie **Weitere Vorschläge**, "
+        "um mehr verwandte Berufsgruppen zu sehen."
     )
 
-    # ── Chip display ─────────────────────────────────────────────────
-    # Selected chips (green, click to deselect)
-    if confirmed:
-        st.markdown("**Ausgewählt — klicken zum Entfernen:**")
-        cols = st.columns(min(len(confirmed), 3))
+    # ── Tile grid: unconfirmed suggestions ───────────────────────────
+    if shown:
+        cols = st.columns(min(len(shown), 3))
         changed = False
-        for i, beruf in enumerate(sorted(confirmed)):
-            with cols[i % len(cols)]:
-                st.markdown(
-                    f'<div style="background:#0f6e56;color:#fff;border-radius:8px;' +
-                    f'padding:8px 14px;margin:3px 0;font-size:13px;line-height:1.4;' +
-                    f'border:2px solid #0f6e56">{beruf}</div>',
-                    unsafe_allow_html=True)
-                if st.button("× Entfernen", key=f"del_{beruf}", use_container_width=True):
-                    st.session_state.confirmed_berufe.discard(beruf)
+        for i, beruf in enumerate(shown):
+            is_exp = beruf not in st.session_state.nd_base
+            tag    = " ↗" if is_exp else ""
+            with cols[i % 3]:
+                # Grey tile — clickable to select
+                if st.button(
+                    beruf + tag,
+                    key=f"tile_add_{beruf}",
+                    use_container_width=True,
+                    help="Klicken zum Auswählen" + (" (verwandter Vorschlag)" if is_exp else ""),
+                ):
+                    st.session_state.confirmed_berufe.add(beruf)
                     changed = True
+                # Style via CSS injection (Streamlit buttons cannot be styled directly)
         if changed:
             st.rerun()
 
-    # Suggested chips (light, click to select)
-    if next5:
-        st.markdown("**Vorschläge — klicken zum Hinzufügen:**")
-        cols2 = st.columns(min(len(next5), 3))
+    # "Weitere Vorschläge" button
+    col_more, _ = st.columns([1,3])
+    if has_more:
+        if col_more.button("Weitere Vorschläge anzeigen"):
+            st.session_state.nd_shown_count += 5
+            st.rerun()
+
+    # ── Selected tiles (green) ────────────────────────────────────────
+    if confirmed:
+        st.markdown("**Ausgewählt:**")
+        cols2 = st.columns(min(len(confirmed), 3))
         changed2 = False
-        for i, beruf in enumerate(next5):
-            is_expanded = beruf not in st.session_state.nd_suggestions
-            bg  = "#eaf2fb" if is_expanded else "#f0f7f4"
-            brd = "#185fa5" if is_expanded else "#0f6e56"
-            txt = "#0c3a6b" if is_expanded else "#085041"
-            tag = " (verwandt)" if is_expanded else ""
-            with cols2[i % len(cols2)]:
+        for i, beruf in enumerate(sorted(confirmed)):
+            with cols2[i % 3]:
                 st.markdown(
-                    f'<div style="background:{bg};color:{txt};border-radius:8px;' +
-                    f'padding:8px 14px;margin:3px 0;font-size:13px;line-height:1.4;' +
-                    f'border:2px solid {brd}">{beruf}{tag}</div>',
+                    f'<div style="background:#0f6e56;color:#fff;border-radius:8px;' +
+                    f'padding:9px 12px;margin:2px 0;font-size:13px;line-height:1.4;text-align:center">' +
+                    f'{beruf}</div>',
                     unsafe_allow_html=True)
-                if st.button("+ Auswählen", key=f"add_{beruf}", use_container_width=True):
-                    st.session_state.confirmed_berufe.add(beruf)
-                    all_shown.add(beruf)
+                if st.button("× Entfernen", key=f"del2_{beruf}", use_container_width=True):
+                    st.session_state.confirmed_berufe.discard(beruf)
                     changed2 = True
         if changed2:
             st.rerun()
-
-    if not confirmed:
-        st.info("Bitte mindestens einen Beruf auswählen, um die Nachfrageanalyse zu starten.")
+    else:
+        st.info("Bitte mindestens eine Berufsgruppe auswählen, um die Nachfrageanalyse zu starten.")
         return []
 
     # ── Demand analysis ───────────────────────────────────────────────
@@ -684,19 +710,16 @@ def phase_2(berufe_df, demand, params):
         st.warning("Keine Nachfragedaten für diese Berufsgruppen in der Jobmonitor-Datenbank.")
         return all_kldb
 
-    # Weighted score (local = 3×, Berlin/BB = 2×, national = 1×)
-    all_regions = (REGIONS_DISPLAY["TH Wildau Region"] +
-                   REGIONS_DISPLAY["Berlin"] + REGIONS_DISPLAY["Brandenburg"] +
-                   REGIONS_DISPLAY["Deutschland"])
+    all_regions = (REGIONS_DISPLAY["TH Wildau Region"] + REGIONS_DISPLAY["Berlin"] +
+                   REGIONS_DISPLAY["Brandenburg"] + REGIONS_DISPLAY["Deutschland"])
     nd_score, nd_text = nachfrage_score(demand_sub, all_kldb, all_regions)
 
     col_sc2, col_info2 = st.columns([1,3])
     with col_sc2:
         score_badge(nd_score, nd_text)
     with col_info2:
-        st.caption("Score 1 = geringe/sinkende Nachfrage  ·  Score 10 = stark wachsend")
-        st.caption("Lokale Nachfrage (TH Wildau Region) wird dreifach gewichtet, "
-                   "Berlin/Brandenburg zweifach, national einfach.")
+        st.caption("Score 10 = stark wachsende lokale Nachfrage  ·  Score 1 = sinkend oder gering")
+        st.caption("Lokale Nachfrage (TH Wildau Region) wird dreifach, Berlin/BB zweifach gewichtet.")
 
     # Regional chart
     rrows = []
