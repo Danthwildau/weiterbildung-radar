@@ -39,6 +39,166 @@ div[data-testid="stVerticalBlock"] > div.element-container { }
 </style>
 """, unsafe_allow_html=True)
 
+
+# ─── GEOCODING & FORMAT CLASSIFICATION ──────────────────────────────
+
+UNI_CITY = {
+    "Akkon Hochschule":"Berlin","Constructor University":"Bremen",
+    "Deutsche Hochschule für Angewandte Wissenschaften":"Hamburg",
+    "Duale Hochschule Baden-Württemberg":"Stuttgart",
+    "Duale Hochschule Schleswig-Holstein":"Kiel","EBS Universität":"Wiesbaden",
+    "EHIP – Europäische Hochschule für Innovation und Perspektive":"Frankfurt",
+    "ESMT European School of Management and Technology":"Berlin",
+    "Evangelische Hochschule Ludwigsburg":"Ludwigsburg",
+    "FOM Hochschule für Oekonomie & Management":"Essen",
+    "Fachhochschule Südwestfalen":"Iserlohn","Fachhochschule der Diakonie":"Bielefeld",
+    "Fachhochschule des Mittelstands":"Bielefeld","Filmuniversität Babelsberg":"Potsdam",
+    "Fliedner Fachhochschule":"Düsseldorf",
+    "HAWK Hochschule für angewandte Wissenschaft und Kunst":"Hildesheim",
+    "HSD Hochschule Döpfer":"Köln",
+    "Helmut-Schmidt-Universität/ Universität der Bundeswehr":"Hamburg",
+    "Hessische Hochschule für öffentliches Management und Sicherheit":"Kassel",
+    "Hochschule Albstadt-Sigmaringen":"Albstadt","Hochschule Anhalt":"Köthen",
+    "Hochschule Ansbach":"Ansbach","Hochschule Biberach":"Biberach an der Riß",
+    "Hochschule Bremerhaven":"Bremerhaven","Hochschule Coburg":"Coburg",
+    "Hochschule Emden/ Leer":"Emden","Hochschule Fresenius":"Düsseldorf",
+    "Hochschule Fulda":"Fulda","Hochschule Geisenheim":"Geisenheim",
+    "Hochschule Harz":"Wernigerode","Hochschule Hof":"Hof",
+    "Hochschule Kaiserslautern":"Kaiserslautern","Hochschule Kempten":"Kempten",
+    "Hochschule Koblenz":"Koblenz","Hochschule Meißen (FH) und Fortbildungszentrum":"Meißen",
+    "Hochschule Merseburg":"Merseburg","Hochschule Niederrhein":"Krefeld",
+    "Hochschule Nordhausen":"Nordhausen","Hochschule Ruhr West":"Mülheim an der Ruhr",
+    "Hochschule Schmalkalden":"Schmalkalden",
+    "Hochschule Weihenstephan-Triesdorf":"Weihenstephan",
+    "Hochschule Weserbergland":"Hameln","Hochschule Worms":"Worms",
+    "Hochschule der Bayerischen Wirtschaft für angewandte Wissenschaften":"München",
+    "Hochschule für Katholische Theologie":"München","Hochschule für Philosophie":"München",
+    "Hochschule für Technik und Wirtschaft des Saarlandes":"Saarbrücken",
+    "Hochschule für Wirtschaft und Gesellschaft Ludwigshafen":"Ludwigshafen",
+    "Hochschule für Wirtschaft und Umwelt Nürtingen-Geislingen":"Nürtingen",
+    "Hochschule für nachhaltige Entwicklung":"Eberswalde",
+    "Hochschule für öffentliche Verwaltung und Finanzen Ludwigsburg":"Ludwigsburg",
+    "IB Hochschule für Gesundheit und Soziales":"Berlin",
+    "INU - Innovative University of Applied Sciences":"Erfurt",
+    "IST-Hochschule für Management":"Düsseldorf",
+    "International Psychoanalytic University":"Berlin",
+    "International School of Management":"Dortmund","Jade Hochschule":"Wilhelmshaven",
+    "Katholische Hochschule Nordrhein-Westfalen":"Köln","Kühne Logistics University":"Hamburg",
+    "Leuphana Universität":"Lüneburg","MU Media University of Applied Sciences":"Stuttgart",
+    "Mediadesign Hochschule":"München",
+    "Ostbayerische Technische Hochschule Amberg-Weiden":"Amberg",
+    "Ostfalia Hochschule":"Wolfenbüttel","Pädagogische Hochschule Ludwigsburg":"Ludwigsburg",
+    "Pädagogische Hochschule Weingarten":"Weingarten",
+    "RPTU Kaiserslautern-Landau":"Kaiserslautern",
+    "SRH Fernhochschule - The Mobile University":"Riedlingen",
+    "Technische Hochschule Aschaffenburg":"Aschaffenburg",
+    "Technische Hochschule Bingen":"Bingen am Rhein",
+    "Technische Hochschule Deggendorf":"Deggendorf",
+    "Technische Hochschule Rosenheim":"Rosenheim",
+    "Tomorrow University of Applied Sciences":"Berlin","University of Labour":"Frankfurt",
+    "Universität Hohenheim":"Stuttgart","Universität Koblenz":"Koblenz",
+    "Universität Marburg":"Marburg","Universität Tübingen":"Tübingen",
+    "Universität Witten/Herdecke":"Witten","Universität des Saarlandes":"Saarbrücken",
+    "Vinzenz Pallotti University":"Vallendar","WHU Vallendar":"Vallendar",
+    "Westfälische Hochschule":"Gelsenkirchen","Westsächsische Hochschule":"Zwickau",
+    "Wilhelm Büchner Hochschule":"Darmstadt",
+    "XU Exponential University of Applied Sciences":"Potsdam",
+    "Zeppelin Universität":"Friedrichshafen","accadis Hochschule":"Bad Homburg",
+    "Hochschule für Kirchenmusik der Evangelischen Kirche von Westfalen":"Herford",
+    "TH Wildau":"Wildau","Technische Hochschule Wildau":"Wildau",
+}
+
+CITY_COORDS = {
+    "Berlin":(52.520,13.405),"Hamburg":(53.551,9.994),"München":(48.137,11.576),
+    "Köln":(50.938,6.960),"Frankfurt":(50.110,8.682),"Stuttgart":(48.775,9.182),
+    "Düsseldorf":(51.225,6.783),"Leipzig":(51.340,12.375),"Dortmund":(51.514,7.468),
+    "Essen":(51.457,7.012),"Bremen":(53.079,8.802),"Dresden":(51.050,13.738),
+    "Hannover":(52.374,9.738),"Nürnberg":(49.452,11.077),"Bielefeld":(52.021,8.532),
+    "Bonn":(50.733,7.101),"Münster":(51.961,7.628),"Karlsruhe":(49.014,8.404),
+    "Mannheim":(49.488,8.468),"Augsburg":(48.370,10.898),"Wiesbaden":(50.082,8.244),
+    "Bochum":(51.481,7.226),"Wuppertal":(51.257,7.151),"Kassel":(51.312,9.481),
+    "Mainz":(49.998,8.274),"Darmstadt":(49.872,8.652),"Trier":(49.749,6.637),
+    "Aachen":(50.776,6.084),"Freiburg":(47.995,7.842),"Regensburg":(49.018,12.098),
+    "Heilbronn":(49.140,9.220),"Ulm":(48.399,9.990),"Würzburg":(49.795,9.929),
+    "Siegen":(50.876,8.024),"Konstanz":(47.659,9.175),"Heidelberg":(49.399,8.673),
+    "Bamberg":(49.900,10.901),"Bayreuth":(49.946,11.578),"Erlangen":(49.598,11.004),
+    "Passau":(48.575,13.455),"Offenburg":(48.473,7.944),"Pforzheim":(48.891,8.704),
+    "Reutlingen":(48.493,9.212),"Jena":(50.928,11.586),"Weimar":(50.979,11.323),
+    "Ilmenau":(50.683,10.916),"Zwickau":(50.720,12.496),"Cottbus":(51.756,14.333),
+    "Eberswalde":(52.833,13.822),"Brandenburg":(52.408,12.534),"Potsdam":(52.390,13.064),
+    "Greifswald":(54.096,13.387),"Wismar":(53.892,11.456),"Oldenburg":(53.143,8.214),
+    "Osnabrück":(52.279,8.047),"Göttingen":(51.534,9.933),"Hildesheim":(52.150,9.957),
+    "Lüneburg":(53.248,10.408),"Wolfenbüttel":(52.163,10.534),"Iserlohn":(51.378,7.704),
+    "Hagen":(51.361,7.474),"Paderborn":(51.719,8.754),"Aalen":(48.836,10.094),
+    "Esslingen":(48.741,9.305),"Ludwigsburg":(48.896,9.192),"Kiel":(54.323,10.133),
+    "Erfurt":(50.978,11.030),"Magdeburg":(52.131,11.640),"Halle":(51.482,11.970),
+    "Chemnitz":(50.832,12.924),"Rostock":(54.092,12.100),"Saarbrücken":(49.234,6.997),
+    "Lübeck":(53.869,10.686),"Marburg":(50.803,8.771),"Tübingen":(48.521,9.057),
+    "Flensburg":(54.793,9.436),"Wernigerode":(51.833,10.783),"Hof":(50.316,11.916),
+    "Kaiserslautern":(49.444,7.769),"Kempten":(47.726,10.316),"Koblenz":(50.360,7.598),
+    "Meißen":(51.163,13.473),"Merseburg":(51.353,11.990),"Krefeld":(51.337,6.557),
+    "Nordhausen":(51.505,10.790),"Schmalkalden":(50.724,10.453),"Hameln":(52.104,9.362),
+    "Worms":(49.632,8.358),"Nürtingen":(48.628,9.336),"Ludwigshafen":(49.479,8.445),
+    "Emden":(53.367,7.206),"Fulda":(50.554,9.676),"Wilhelmshaven":(53.530,8.101),
+    "Albstadt":(48.214,9.023),"Köthen":(51.751,11.971),"Ansbach":(49.301,10.571),
+    "Bremerhaven":(53.539,8.579),"Coburg":(50.259,10.965),"Amberg":(49.444,11.861),
+    "Aschaffenburg":(49.977,9.149),"Deggendorf":(48.840,12.960),"Rosenheim":(47.857,12.125),
+    "Witten":(51.436,7.353),"Gelsenkirchen":(51.517,7.106),"Bad Homburg":(50.228,8.618),
+    "Friedrichshafen":(47.651,9.479),"Vallendar":(50.407,7.601),"Weingarten":(47.803,9.639),
+    "Mülheim an der Ruhr":(51.426,6.884),"Herford":(52.113,8.676),"Wildau":(52.314,13.638),
+    "Weihenstephan":(48.398,11.728),"Riedlingen":(48.154,9.477),"Geisenheim":(49.984,7.965),
+    "Biberach an der Riß":(48.097,9.793),"Bingen am Rhein":(49.966,7.896),
+    "Landshut":(48.537,12.152),"Furtwangen":(48.047,8.208),"Ravensburg":(47.782,9.612),
+}
+
+GERMAN_CITIES = list(CITY_COORDS.keys())
+
+def get_uni_city(uni_name):
+    if not isinstance(uni_name, str): return None
+    # Direct lookup
+    if uni_name in UNI_CITY: return UNI_CITY[uni_name]
+    # Extract city from name
+    for city in GERMAN_CITIES:
+        if city.lower() in uni_name.lower():
+            return city
+    return None
+
+def get_delivery_mode(fmt, spatial_flex=0):
+    """
+    Classify into 4 delivery modes:
+      fully_online     - 100% digital, no fixed location
+      hybrid_flexible  - hybrid with no fixed location (e.g. Blended/Combined Learning)
+      hybrid_location  - hybrid tied to a specific campus
+      in_person        - primarily face-to-face at a fixed location
+    """
+    fmt_lower = str(fmt).lower()
+    flex = float(spatial_flex) if spatial_flex else 0
+
+    if flex == 100 or any(x in fmt_lower for x in ["fernstudium","fernunterricht","digitaler kurs"]):
+        return "fully_online"
+    if any(x in fmt_lower for x in ["combined learning","blended learning","hybrid learning",
+                                      "virtuelles klassenzimmer","online-seminar"]):
+        return "hybrid_flexible"
+    if any(x in fmt_lower for x in ["berufsbegleitend","blockkurs","wochenendkurs",
+                                      "teilzeitstudium","vollzeitstudium","studium"]):
+        return "hybrid_location"
+    if any(x in fmt_lower for x in ["präsenz","seminar","praxistraining"]):
+        return "in_person"
+    return "hybrid_location"  # default for academic courses
+
+DELIVERY_LABELS = {
+    "fully_online":    "Vollständig online",
+    "hybrid_flexible": "Hybrid (ortsunabhängig)",
+    "hybrid_location": "Hybrid (standortgebunden)",
+    "in_person":       "Präsenz",
+}
+DELIVERY_COLORS = {
+    "fully_online":    "#e8eaf6",
+    "hybrid_flexible": "#e8f5e9",
+    "hybrid_location": "#fff8e1",
+    "in_person":       "#fce4ec",
+}
+
 DATA = Path(__file__).parent / "data"
 
 REGIONS_DISPLAY = {
@@ -56,7 +216,7 @@ CAT_LABELS = {
     "PGT_effektive_Verwaltung":             "Effektive Verwaltung",
     "PGT_effektive_Verwaltung_oeffentlich": "Effektive Verwaltung (öffentlich)",
     "PGT_zukunftsfaehige_Mobilitaet":       "Zukunftsfähige Mobilität",
-    "PGT_nachhaltige_Wertschoepfung":       "Nachhaltige Wertschöpfung",
+    "PGT_nachhaltige_Wertschoepfung":       "Nachhaltige Wert(e)schöpfung",
     "QST_Diversity":                        "QST: Diversity",
     "QST_Nachhaltigkeit":                   "QST: Nachhaltigkeit",
     "QST_Internationalisation":             "QST: Internationalisation",
@@ -222,6 +382,26 @@ def load_offers():
     for c in CAT_COLS:
         if c in df.columns: df[c] = df[c].fillna(False).astype(bool)
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
+
+    # Classify delivery mode
+    df["delivery_mode"] = df.apply(
+        lambda r: get_delivery_mode(r.get("format",""), r.get("spatial_flex",0)), axis=1)
+
+    # Geocode HW courses (provider city → lat/lon)
+    def get_coords(row):
+        if row.get("source") != "hochundweit": return None, None
+        uni  = str(row.get("provider",""))
+        city = get_uni_city(uni)
+        if not city: return None, None
+        coords = CITY_COORDS.get(city)
+        return (coords[0], coords[1]) if coords else (None, None)
+
+    coords = df.apply(get_coords, axis=1)
+    df["lat"] = [c[0] for c in coords]
+    df["lon"] = [c[1] for c in coords]
+    df["city_name"] = df.apply(
+        lambda r: get_uni_city(str(r.get("provider",""))) if r.get("source")=="hochundweit" else r.get("city",""),
+        axis=1)
     return df
 
 @st.cache_data
@@ -244,16 +424,23 @@ def load_kgs():
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────
 
-def match_offers(offers, user_text, selected_cats, kg, n_per_source=30):
+def match_offers(offers, user_text, selected_cats, kg, n_per_source=30, params=None):
     """
-    Score courses by relevance to user_text.
-    Title matches are weighted 5× more than description matches.
-    Description matches are length-normalised to prevent MN's long
-    keyword-stuffed titles from dominating over concise HW titles.
-    Returns up to n_per_source from each source, sorted by score.
+    Score courses by relevance. Improvements over naive keyword count:
+    - Title match weighted 5× (HW has short precise titles; this fixes MN dominance)
+    - Description match log-normalised by length (prevents long MN SEO titles winning)
+    - HW courses get +1.5 source bonus (academic courses are primary competition)
+    - Delivery mode match boosts score (Präsenz matches Präsenz/Hybrid)
+    - Degree and ECTS proximity boost when provided by user
+    Returns up to n_per_source from each source, interleaved by score.
     """
     user_words = tokenize(user_text)
     user_stems = {w[:5] for w in user_words if len(w) >= 4}
+    # Delivery mode preference from user's format choice
+    user_delivery = get_delivery_mode(params.get("format","") if params else "")
+    user_degree   = str(params.get("degree","")).lower() if params else ""
+    user_ects     = int(params.get("ects",0)) if params else 0
+
     scores = []
     for _, row in offers.iterrows():
         s = 0.0
@@ -264,13 +451,13 @@ def match_offers(offers, user_text, selected_cats, kg, n_per_source=30):
         ds = {w[:5] for w in dw if len(w)>=4}
         desc_len = max(len(dw), 1)
 
-        # Title match: high fixed weight per match
+        # Title: high weight (5×)
         t_exact = user_words & tw
         t_stem  = (user_stems & ts) - user_words
         s += len(t_exact) * 5.0
         s += len(t_stem)  * 2.0
 
-        # Description: log-normalised to prevent length advantage
+        # Description: log-normalised
         d_exact = user_words & dw
         d_stem  = (user_stems & ds) - user_words - t_exact
         if d_exact:
@@ -278,13 +465,33 @@ def match_offers(offers, user_text, selected_cats, kg, n_per_source=30):
         if d_stem:
             s += math.log(1 + len(d_stem))  / math.log(1 + desc_len) * 3
 
+        # Category match
         for cat in selected_cats:
             if row.get(cat, False): s += 2.0
         if kg and str(row.get("knowledgeGroup","")) == kg: s += 1.5
+
+        # HW source bonus (academic courses = primary competition reference)
+        if row.get("source") == "hochundweit":
+            s += 1.5
+
+        # Delivery mode match (same mode = more relevant competition)
+        row_mode = str(row.get("delivery_mode",""))
+        if row_mode == user_delivery:
+            s += 2.0
+        elif (user_delivery in ("hybrid_location","in_person") and
+              row_mode in ("hybrid_location","in_person")):
+            s += 1.0  # partial match
+
+        # Degree match
+        row_degree = str(row.get("degree","")).lower()
+        if user_degree and row_degree and user_degree[:4] in row_degree[:4]:
+            s += 1.5
+
         scores.append(s)
 
     o2 = offers.copy(); o2["_score"] = scores
-    o2 = o2[o2["_score"] > 0].sort_values("_score", ascending=False)
+    # Minimum threshold: must have text relevance (not just format/source boost)
+    o2 = o2[o2["_score"] >= 2.0].sort_values("_score", ascending=False)
     hw = o2[o2["source"] == "hochundweit"].head(n_per_source)
     mn = o2[o2["source"] == "meinnow"].head(n_per_source)
     return pd.concat([hw, mn]).sort_values("_score", ascending=False).reset_index(drop=True)
@@ -407,6 +614,50 @@ def phase_0(kgs):
             "dev_h":dev_h,"dev_rate":dev_rate,"impl_h":impl_h,
             "impl_rate":impl_rate,"sachkosten":sachkosten,"overhead":overhead}
 
+
+def show_offer_map(matched_df):
+    """Show HW offers as dots on a map of Germany."""
+    try:
+        import pydeck as pdk
+        hw_map = matched_df[
+            (matched_df["source"] == "hochundweit") &
+            matched_df["lat"].notna() & matched_df["lon"].notna()
+        ].copy()
+        if hw_map.empty:
+            st.caption("Keine Kartenposition für die gefundenen Hochschulangebote verfügbar.")
+            return
+        # Aggregate: count courses per city
+        city_agg = hw_map.groupby(["city_name","lat","lon"], as_index=False).agg(
+            anzahl=("title","count"),
+            titel_sample=("title", lambda x: "<br>".join(x.head(3).tolist()))
+        )
+        layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=city_agg,
+            get_position=["lon","lat"],
+            get_radius="anzahl * 15000",
+            get_fill_color=[24, 95, 165, 180],
+            pickable=True,
+        )
+        view = pdk.ViewState(latitude=51.2, longitude=10.4, zoom=5, pitch=0)
+        tooltip = {"html": "<b>{city_name}</b><br>{anzahl} Kurs(e)<br>{titel_sample}",
+                   "style": {"backgroundColor":"#185fa5","color":"white","fontSize":"12px"}}
+        st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view,
+                                  tooltip=tooltip, map_style="light"))
+        st.caption(f"{len(hw_map)} Hochschulangebote kartiert ({city_agg['anzahl'].sum()} Kurse an {len(city_agg)} Standorten). Kreisgröße = Anzahl Kurse.")
+    except ImportError:
+        # Fallback: simple table of locations
+        hw_map = matched_df[
+            (matched_df["source"] == "hochundweit") &
+            matched_df["city_name"].notna()
+        ].copy()
+        if hw_map.empty:
+            st.caption("pydeck nicht installiert und keine Standortdaten verfügbar.")
+            return
+        city_counts = hw_map.groupby("city_name").size().reset_index(name="Kurse").sort_values("Kurse",ascending=False)
+        st.dataframe(city_counts.head(15), use_container_width=True, hide_index=True)
+        st.caption("Karte nicht verfügbar — pip install pydeck für interaktive Karte.")
+
 def phase_1(offers, params):
     section_header("#d4edda", "3. Angebot — wie viel gibt es bereits?")
     if not params["user_text"].strip():
@@ -414,7 +665,8 @@ def phase_1(offers, params):
 
     with st.spinner("Suche ähnliche Angebote..."):
         matched = match_offers(offers, params["user_text"],
-                               params["selected_cats"], params["kg"])
+                               params["selected_cats"], params["kg"],
+                               params=params)
 
     # Split by purpose:
     # Wettbewerb: same-format courses (Präsenz/Hybrid/Berufsbegleitend) = real competition
@@ -447,129 +699,135 @@ def phase_1(offers, params):
 
     st.markdown("""<div style="height:8px"></div>""", unsafe_allow_html=True)
 
+    with st.expander("Karte der Hochschulangebote anzeigen"):
+        show_offer_map(matched)
+
     subtab_wett, subtab_preis = st.tabs([
         f"Wettbewerbs-Angebote ({n_comp} Präsenz/Hybrid)",
         f"Preisreferenz ({n_total} inkl. Online)",
     ])
 
-    ctrl1, _ = st.columns([1,4])
-    n_display = ctrl1.selectbox("Angebote pro Seite", [10, 20], index=0, key="n_display")
-
     def show_offers(df_src, tab_key, show_price_stats=True):
         if df_src.empty:
             st.info("Keine passenden Angebote für diese Kombination."); return
 
-        # Filter out deselected
-        active = df_src[~df_src["id"].astype(str).isin(st.session_state.deselected)].reset_index(drop=True)
+        # Build editor key unique to this tab
+        editor_key = f"editor_{tab_key}"
+
+        # Prepare display dataframe
+        def fmt_price(row):
+            pb = str(row.get("price_band",""))
+            if pb in PREIS_LABELS: return PREIS_LABELS[pb]
+            if pd.notna(row.get("price")) and row["price"] > 0:
+                return f"{row['price']:,.0f} EUR"
+            return "k.A."
+
+        def fmt_source(src):
+            return "Hochschule" if src == "hochundweit" else "Weiterbildung"
+
+        def fmt_mode(mode):
+            return DELIVERY_LABELS.get(str(mode), mode)
+
+        display = pd.DataFrame({
+            "Einbeziehen":  [str(r["id"]) not in st.session_state.deselected
+                             for _, r in df_src.iterrows()],
+            "Quelle":       df_src["source"].apply(fmt_source),
+            "Titel":        df_src["title"].fillna("").str[:60],
+            "Anbieter":     df_src["provider"].fillna("").str[:30],
+            "Format":       df_src["format"].apply(fmt_mode).str[:25],
+            "Umfang":       df_src.get("umfang", pd.Series("", index=df_src.index)).fillna("").apply(lambda x: x or "k.A."),
+            "Preis":        df_src.apply(fmt_price, axis=1),
+            "Link":         df_src["url"].fillna("").apply(
+                                lambda u: u if u.startswith("http") else ""),
+            "_id":          df_src["id"].astype(str),
+            "_delivery":    df_src["delivery_mode"].fillna(""),
+        })
+
+        # Colour mapping for rows: use delivery mode background
+        # st.data_editor doesn't support per-row background natively,
+        # but we prefix the Quelle column with a colour indicator
+        def quelle_icon(row):
+            src_icon = "🔵" if row["Quelle"] == "Hochschule" else "🟡"
+            mode_icons = {
+                "fully_online":    "💻",
+                "hybrid_flexible": "🔄",
+                "hybrid_location": "🏫",
+                "in_person":       "👥",
+            }
+            mode_icon = mode_icons.get(row["_delivery"], "")
+            return f"{src_icon}{mode_icon} {row['Quelle']}"
+
+        display["Quelle"] = display.apply(quelle_icon, axis=1)
+
+        st.caption(
+            "Häkchen in **Einbeziehen** entfernen, um ein Angebot aus der Preisstatistik auszuschließen. "
+            "🔵 = Hochschule (hochundweit)  🟡 = Weiterbildung (mein-now)  "
+            "💻 Online  🔄 Hybrid (flex)  🏫 Hybrid (Standort)  👥 Präsenz"
+        )
+
+        # Render editable table — only "Einbeziehen" is editable
+        edited = st.data_editor(
+            display.drop(columns=["_id","_delivery"]),
+            key=editor_key,
+            use_container_width=True,
+            hide_index=True,
+            height=min(36 * len(display) + 38, 600),
+            column_config={
+                "Einbeziehen": st.column_config.CheckboxColumn(
+                    "Einbeziehen",
+                    help="Häkchen entfernen = aus Statistik ausschließen",
+                    width="small",
+                ),
+                "Link": st.column_config.LinkColumn(
+                    "Link",
+                    display_text="Öffnen →",
+                    width="small",
+                ),
+                "Titel":    st.column_config.TextColumn("Titel",    width="large"),
+                "Anbieter": st.column_config.TextColumn("Anbieter", width="medium"),
+                "Format":   st.column_config.TextColumn("Format",   width="medium"),
+                "Umfang":   st.column_config.TextColumn("Umfang",   width="small"),
+                "Preis":    st.column_config.TextColumn("Preis",    width="small"),
+                "Quelle":   st.column_config.TextColumn("Quelle",   width="medium"),
+            },
+            disabled=["Quelle","Titel","Anbieter","Format","Umfang","Preis","Link"],
+        )
+
+        # Sync checkbox changes back to session state
+        if edited is not None:
+            for i, row_checked in enumerate(edited["Einbeziehen"]):
+                rid = display["_id"].iloc[i]
+                if row_checked:
+                    st.session_state.deselected.discard(rid)
+                else:
+                    st.session_state.deselected.add(rid)
+
+        # Compute active set for statistics
+        active_ids = set(display["_id"]) - st.session_state.deselected
+        active = df_src[df_src["id"].astype(str).isin(active_ids)]
         n_excl = len(df_src) - len(active)
         if n_excl:
-            st.caption(f"{n_excl} Angebot(e) ausgeblendet.")
-
-        # Pagination
-        n_pages  = max(1, math.ceil(len(df_src) / n_display))
-        pk       = f"page_{tab_key}"
-        if pk not in st.session_state: st.session_state[pk] = 0
-        page     = max(0, min(st.session_state[pk], n_pages-1))
-        page_rows = df_src.iloc[page*n_display:(page+1)*n_display].copy()
-
-        # Table header
-        st.markdown(
-            '<div style="display:grid;grid-template-columns:90px 1fr 140px 80px 90px 80px 70px;'
-            'gap:0;background:#f0f4f8;padding:5px 0;font-size:12px;font-weight:600;'
-            'border-bottom:2px solid #ccc;margin-bottom:2px">'
-            '<span style="padding:0 6px">Quelle</span>'
-            '<span style="padding:0 6px">Titel</span>'
-            '<span style="padding:0 6px">Anbieter</span>'
-            '<span style="padding:0 6px">Umfang</span>'
-            '<span style="padding:0 6px">Preis</span>'
-            '<span style="padding:0 6px">Link</span>'
-            '<span style="padding:0 6px"></span>'
-            '</div>',
-            unsafe_allow_html=True)
-
-        changed = False
-        for _, row in page_rows.iterrows():
-            rid      = str(row["id"])
-            is_active = rid not in st.session_state.deselected
-
-            pb = str(row.get("price_band",""))
-            price_str = (PREIS_LABELS.get(pb) if pb in PREIS_LABELS
-                         else (f"{row['price']:,.0f} EUR" if pd.notna(row.get("price")) and row["price"]>0 else "k.A."))
-            url   = str(row.get("url",""))
-            link  = (f'<a href="{url}" target="_blank">Link&nbsp;&rarr;</a>' if url.startswith("http") else "—")
-            umf   = str(row.get("umfang","") or "k.A.")
-            title = str(row.get("title",""))[:52]
-            prov  = str(row.get("provider",""))[:22]
-            src_l = row.get("source","")
-            badge = ('<span style="background:#dceefb;color:#0c3a6b;padding:1px 6px;border-radius:4px;font-size:11px">HW</span>'
-                     if src_l=="hochundweit" else
-                     '<span style="background:#faeeda;color:#6b3000;padding:1px 6px;border-radius:4px;font-size:11px">MN</span>')
-            row_bg = "#fafafa" if is_active else "#fff0f0"
-
-            st.markdown(
-                f'<div style="display:grid;grid-template-columns:90px 1fr 140px 80px 90px 80px 70px;' +
-                f'gap:0;background:{row_bg};padding:4px 0;font-size:13px;' +
-                f'border-bottom:1px solid #e8e8e8;align-items:center">' +
-                f'<span style="padding:0 6px">{badge}</span>' +
-                f'<span style="padding:0 6px" title="{str(row.get("title",""))}">{title}</span>' +
-                f'<span style="padding:0 6px;color:#555;font-size:12px">{prov}</span>' +
-                f'<span style="padding:0 6px;color:#555;font-size:12px">{umf}</span>' +
-                f'<span style="padding:0 6px;font-weight:500">{price_str}</span>' +
-                f'<span style="padding:0 6px">{link}</span>' +
-                f'<span style="padding:0 6px"></span>' +
-                '</div>',
-                unsafe_allow_html=True)
-
-            btn_label = "Ausblenden" if is_active else "Wieder anzeigen"
-            if st.button(btn_label, key=f"btn_{tab_key}_{rid}", use_container_width=False):
-                if is_active:
-                    st.session_state.deselected.add(rid)
-                else:
-                    st.session_state.deselected.discard(rid)
-                changed = True
-
-        if changed:
-            st.rerun()
-
-        # Pagination controls
-        if n_pages > 1:
-            pc1, pc2, pc3 = st.columns([1,2,1])
-            if pc1.button("← Zurück", key=f"prev_{tab_key}", disabled=page==0):
-                st.session_state[pk] = page-1; st.rerun()
-            pc2.markdown(f'<div style="text-align:center;padding:6px;font-size:13px">'
-                         f'Seite {page+1} von {n_pages}</div>', unsafe_allow_html=True)
-            if pc3.button("Weiter →", key=f"next_{tab_key}", disabled=page==n_pages-1):
-                st.session_state[pk] = page+1; st.rerun()
+            st.caption(f"{n_excl} Angebot(e) aus der Statistik ausgeschlossen.")
 
         if not show_price_stats: return
 
-        # Price stats from active HW courses (real granular prices)
+        # Price stats from active HW courses
         hw_act = active[(active["source"]=="hochundweit") &
                         active["price"].notna() & (active["price"]>0)]
         mn_act = active[active["source"]=="meinnow"]
 
-        st.markdown("")
         if len(hw_act) >= 3:
-            st.markdown("**Preisstatistik — Hochschulangebote (reale Preise):**")
+            st.markdown("**Preisstatistik — Hochschulangebote:**")
             m1,m2,m3 = st.columns(3)
             m1.metric("Median",    f"{hw_act['price'].median():,.0f} EUR")
             m2.metric("25. Perz.", f"{hw_act['price'].quantile(.25):,.0f} EUR")
             m3.metric("75. Perz.", f"{hw_act['price'].quantile(.75):,.0f} EUR")
         if len(mn_act) >= 2:
             bands = mn_act["price_band"].value_counts()
-            band_str = "  ·  ".join(
-                f"{PREIS_LABELS.get(b,b)}: {c}" for b,c in bands.items())
+            band_str = "  ·  ".join(f"{PREIS_LABELS.get(b,b)}: {c}" for b,c in bands.items())
             st.caption(f"Weiterbildungsangebote (Preisbänder): {band_str}")
         elif len(hw_act) < 3:
             st.caption("Zu wenige Preisangaben für Statistik.")
-
-        # Legend
-        st.markdown(
-            '<div style="margin-top:4px;font-size:12px;color:#666">' +
-            '<span style="background:#dceefb;color:#0c3a6b;padding:1px 6px;border-radius:4px">HW</span> ' +
-            'hochundweit.de &nbsp;·&nbsp;' +
-            '<span style="background:#faeeda;color:#6b3000;padding:1px 6px;border-radius:4px">MN</span> ' +
-            'mein-now.de</div>', unsafe_allow_html=True)
 
     with subtab_wett:
         tab_local, tab_regional, tab_national = st.tabs([
@@ -767,7 +1025,7 @@ def phase_2(berufe_df, demand, params):
 
 
 def phase_3(offers, params, matched):
-    section_header("#dce3ff", "5. Preisgestaltung")
+    section_header("#e8eaf6", "5. Preisgestaltung")
     priced_all = matched[
     (matched["source"] == "hochundweit") &
     matched["price"].notna() &
