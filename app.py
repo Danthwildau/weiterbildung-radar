@@ -1,12 +1,7 @@
 """
 Weiterbildungs-Radar — TH Wildau
-Analysewerkzeug für Lehrende: Angebot, Nachfrage und Preisgestaltung.
 """
-
-import re
-import json
-import math
-import warnings
+import re, json, math, warnings
 from collections import defaultdict
 from pathlib import Path
 
@@ -19,30 +14,44 @@ warnings.filterwarnings("ignore")
 
 st.set_page_config(
     page_title="Weiterbildungs-Radar · TH Wildau",
-    page_icon=None,
+    page_icon="https://www.th-wildau.de/favicon.ico",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+# Inject light section backgrounds
+st.markdown("""
+<style>
+div[data-testid="stVerticalBlock"] > div.element-container { }
+.section-input      { background:#f0f4f8; border-radius:10px; padding:1.2rem 1.4rem; margin-bottom:1rem; }
+.section-cost       { background:#f5f0fa; border-radius:10px; padding:1.2rem 1.4rem; margin-bottom:1rem; }
+.section-angebot    { background:#f0f7f4; border-radius:10px; padding:1.2rem 1.4rem; margin-bottom:1rem; }
+.section-nachfrage  { background:#fff8f0; border-radius:10px; padding:1.2rem 1.4rem; margin-bottom:1rem; }
+.section-preis      { background:#f0f4ff; border-radius:10px; padding:1.2rem 1.4rem; margin-bottom:1rem; }
+.beruf-tag-sel {
+    display:inline-block;background:#0f6e56;color:#fff;
+    border-radius:6px;padding:4px 12px;margin:3px;font-size:13px;cursor:pointer;
+}
+.beruf-tag-unsel {
+    display:inline-block;background:#e1f5ee;color:#085041;
+    border-radius:6px;padding:4px 12px;margin:3px;font-size:13px;cursor:pointer;
+}
+</style>
+""", unsafe_allow_html=True)
+
 DATA = Path(__file__).parent / "data"
 
 REGIONS_DISPLAY = {
-    "TH Wildau Region": ["Dahme-Spreewald", "Oder-Spree", "Teltow-Fläming"],
+    "TH Wildau Region": ["Dahme-Spreewald","Oder-Spree","Teltow-Fläming"],
     "Berlin":           ["Berlin"],
     "Brandenburg":      ["Brandenburg"],
     "Deutschland":      ["Deutschland"],
 }
-REGION_ORDER = ["TH Wildau Region", "Berlin", "Brandenburg", "Deutschland"]
+REGION_ORDER = ["TH Wildau Region","Berlin","Brandenburg","Deutschland"]
 
-CAT_COLS = [
-    "PGT_effektive_Verwaltung",
-    "PGT_effektive_Verwaltung_oeffentlich",
-    "PGT_zukunftsfaehige_Mobilitaet",
-    "PGT_nachhaltige_Wertschoepfung",
-    "QST_Diversity",
-    "QST_Nachhaltigkeit",
-    "QST_Internationalisation",
-]
+CAT_COLS = ["PGT_effektive_Verwaltung","PGT_effektive_Verwaltung_oeffentlich",
+            "PGT_zukunftsfaehige_Mobilitaet","PGT_nachhaltige_Wertschoepfung",
+            "QST_Diversity","QST_Nachhaltigkeit","QST_Internationalisation"]
 CAT_LABELS = {
     "PGT_effektive_Verwaltung":             "Effektive Verwaltung",
     "PGT_effektive_Verwaltung_oeffentlich": "Effektive Verwaltung (öffentlich)",
@@ -52,677 +61,683 @@ CAT_LABELS = {
     "QST_Nachhaltigkeit":                   "QST: Nachhaltigkeit",
     "QST_Internationalisation":             "QST: Internationalisation",
 }
-
 PREIS_LABELS = {
-    "BIS_500_EUR":              "bis 500 €",
-    "UEBER_500_BIS_1000_EUR":   "500 – 1.000 €",
-    "UEBER_1000_BIS_5000_EUR":  "1.000 – 5.000 €",
-    "UEBER_5000_BIS_10000_EUR": "5.000 – 10.000 €",
-    "UEBER_10000_EUR":          "über 10.000 €",
+    "BIS_500_EUR":              "bis 500 EUR",
+    "UEBER_500_BIS_1000_EUR":   "500 – 1.000 EUR",
+    "UEBER_1000_BIS_5000_EUR":  "1.000 – 5.000 EUR",
+    "UEBER_5000_BIS_10000_EUR": "5.000 – 10.000 EUR",
+    "UEBER_10000_EUR":          "über 10.000 EUR",
 }
 
-KLDB_TOPICS = {
-    "11":["landwirt","forst","agrar","garten","tier"],
-    "21":["bergbau","mineral","glas","keramik"],
-    "22":["holz","papier","druck","möbel"],
-    "23":["kunststoff","kautschuk","chemie"],
-    "24":["metall","stahl","schweiss","giesser"],
-    "25":["maschinen","mechatronik","industrie","automatisierung","fertigungs"],
-    "26":["elektro","elektronik","energie"],
-    "27":["textil","bekleidung","leder"],
-    "28":["lebensmittel","küche","gastronomie","hotel"],
-    "29":["bau","hochbau","tiefbau","architektur"],
-    "31":["ingenieur","konstruktion","planung","bau","architektur"],
-    "32":["naturwissenschaft","physik","chemie","biologie","labor"],
-    "41":["informatik","software","programmier","data","ki","digital"],
-    "43":["it","cyber","cloud","netzwerk","devops","entwickler"],
-    "51":["lager","logistik","transport","spedition"],
-    "52":["schutz","sicherheit","feuerwehr"],
-    "53":["reinigung","hauswirtschaft"],
-    "61":["verkauf","marketing","vertrieb","handel"],
-    "62":["einzelhandel","kaufmann","kauffrau"],
-    "71":["büro","verwaltung","management","projekt"],
-    "72":["finanz","steuer","versicherung","bank","controlling"],
-    "73":["recht","jurist","notar","anwalt"],
-    "81":["gesundheit","pflege","medizin","klinik","kranken"],
-    "82":["alten","sozial","pflege"],
-    "83":["pädagog","erzieh","sozialarbeit","kind"],
-    "84":["lehrer","bildung","ausbildung","weiterbildung"],
-    "91":["sport","fitness","gesundheitsförder"],
-    "92":["dienstleist","service","beratung"],
-    "93":["medien","gestaltung","design","kunst","kultur"],
-    "94":["sprach","dolmetsch","übersetz"],
+# ─── MATCHING CONFIG ─────────────────────────────────────────────────────
+
+SHORT_TECH = {"ki","it","iot","erp","crm","sap","ai","ml","bi","bim","cad",
+              "cam","cnc","plm","rpa","api","sql","hr","aws","gcp","kpi","ux","ui"}
+
+CONCEPT_TO_KLDB = {
+    r"\bki\b|\bai\b|künstl.*intel|machine.learn|deep.learn|neural|llm|chatbot|sprachmodell": {
+        "primary":["41","43"],"secondary":[]},
+    r"softwar.*entwickl|programmi|app.*entwickl|web.*entwickl|coding": {
+        "primary":["41","43"],"secondary":[]},
+    r"data.scien|datenanalys|daten.*analyst|big.data|data.engineer|datengetrieben": {
+        "primary":["41","43"],"secondary":[]},
+    r"cyber.*sicher|it.sicher|informations.*sicher|security|it.forensik": {
+        "primary":["43"],"secondary":["41"]},
+    r"cloud|devops|infrastruktur.*it|kubernetes|container": {
+        "primary":["43"],"secondary":["41"]},
+    r"digitalis|digital.transform|industrie.*4\.?0|smart.factor": {
+        "primary":["41","43"],"secondary":["25","26"]},
+    r"automobil|automotive|\bkfz\b|kraftfahr": {
+        "primary":["25","26"],"secondary":["62"]},
+    r"elektromobil|e.mobil|ladeinfra|ladesäule": {
+        "primary":["26","25"],"secondary":[]},
+    r"autonomes.fahr|selbstfahr|adas": {
+        "primary":["25","26","41"],"secondary":[]},
+    r"fahrzeugtechn|fahrzeugentwick|fahrzeugbau": {
+        "primary":["25","26"],"secondary":[]},
+    r"maschinenbau|fertigungs.*techn|produktions.*techn": {
+        "primary":["25"],"secondary":["26"]},
+    r"robotik|automatisier.*techn|mechatronik": {
+        "primary":["25","26"],"secondary":[]},
+    r"elektrotechn|elektroingenieur|energietechn": {
+        "primary":["26"],"secondary":["25"]},
+    r"projekt.*manag|agil|scrum|product.owner|kanban": {
+        "primary":["71"],"secondary":["72"]},
+    r"supply.chain|logistik.*manag|beschaffungs.*manag": {
+        "primary":["51"],"secondary":[]},
+    r"marketing|vertrieb.*strateg|sales.*manag": {
+        "primary":["61"],"secondary":[]},
+    r"personal.*manag|hr.manag|talent.manag|recruiting": {
+        "primary":["71"],"secondary":[]},
+    r"finanz.*manag|controlling|buchführ|rechnungsw|bilanzier": {
+        "primary":["72"],"secondary":[]},
+    r"strateg.*manag|unternehmens.*führ|business.develop|change.manag": {
+        "primary":["71","72"],"secondary":[]},
+    r"datenschutz|dsgvo|privacy|datensicherheit": {
+        "primary":["73","71"],"secondary":[]},
+    r"verwaltungs.*recht|öffentl.*verwalt|kommunal|beamt": {
+        "primary":["73"],"secondary":["71"]},
+    r"compliance|audit|revision|risiko.*manag": {
+        "primary":["73","72"],"secondary":[]},
+    r"gesundheits.*manag|klinik.*manag|krankenhaus.*führ": {
+        "primary":["81"],"secondary":["82"]},
+    r"pflege.*manag|pflegefach|altenpfleg|demenz": {
+        "primary":["82","81"],"secondary":[]},
+    r"bildungs.*manag|hochschul.*didakt|lehrkompe|didaktik": {
+        "primary":["84"],"secondary":["83"]},
+    r"weiterbildungs.*manag|e.learn|lerndesign|instructional": {
+        "primary":["84"],"secondary":["83"]},
+    r"bau.*manag|bauprojekt|architektur|stadtplan": {
+        "primary":["31","29"],"secondary":[]},
+    r"nachhaltigkeits.*manag|\besg\b|\bcsrb?|umwelt.*manag": {
+        "primary":["32","31"],"secondary":["84"]},
+    r"energie.*manag|erneuerbar.*energie|photovoltaik|windenergie": {
+        "primary":["26","31"],"secondary":[]},
+    r"verkehrs.*plan|mobilitäts.*manag|öpnv|schienenverkehr": {
+        "primary":["51"],"secondary":["31"]},
+    r"medien.*manag|kommunikation.*manag|pr.manag|journalismus": {
+        "primary":["93"],"secondary":[]},
+    r"sprach.*kompetenz|fremdsprach|interkulturell|internationali": {
+        "primary":["94"],"secondary":[]},
 }
 
-# ─── DATA LOADING ─────────────────────────────────────────────────────────
+def tokenize(text):
+    all_words = re.findall(r'\b\w+\b', text.lower())
+    return {w for w in all_words if len(w) >= 4 or w in SHORT_TECH}
+
+def match_berufe(berufe_df, user_text, n=15):
+    user_words  = tokenize(user_text)
+    user_stems  = {w[:5] for w in user_words if len(w) >= 4}
+    user_lower  = user_text.lower()
+
+    primary, secondary = set(), set()
+    for pattern, groups in CONCEPT_TO_KLDB.items():
+        if re.search(pattern, user_lower):
+            primary.update(groups["primary"])
+            secondary.update(groups["secondary"])
+    secondary -= primary
+
+    scores = defaultdict(float)
+    for _, row in berufe_df.iterrows():
+        prefix2 = row["kldb_prefix2"]
+        last    = str(row["kldb_id"])[-1]
+        beruf_lower = row["beruf_name"].lower()
+        beruf_words = tokenize(beruf_lower)
+        beruf_stems = {w[:5] for w in beruf_words if len(w) >= 4}
+
+        s  = len(user_words & beruf_words) * 4.0
+        s += len((user_stems & beruf_stems) - user_words) * 1.5
+
+        if primary and prefix2 in primary:
+            s += 2.0
+            if last in ("3","4"): s += 1.0
+        elif secondary and prefix2 in secondary:
+            s += 0.8
+            if last in ("3","4"): s += 0.5
+
+        if primary and last == "1":
+            s -= 1.0
+
+        if s >= 2.0:
+            scores[row["beruf_name"]] = s
+
+    ranked = sorted(scores.items(), key=lambda x: -x[1])[:n]
+    return [{"beruf_name":b,
+             "kldb_id": int(berufe_df[berufe_df["beruf_name"]==b]["kldb_id"].iloc[0]),
+             "kldb_prefix2": berufe_df[berufe_df["beruf_name"]==b]["kldb_prefix2"].iloc[0],
+             "score":s} for b,s in ranked]
+
+def expand_berufe(berufe_df, selected_names, exclude_names, n=15):
+    sel_rows    = berufe_df[berufe_df["beruf_name"].isin(selected_names)]
+    sel_prefixes = set(sel_rows["kldb_prefix2"].tolist())
+    sel_words   = set()
+    for name in selected_names:
+        sel_words |= tokenize(name)
+    sel_stems = {w[:5] for w in sel_words if len(w) >= 4}
+
+    scores = defaultdict(float)
+    for _, row in berufe_df.iterrows():
+        if row["beruf_name"] in exclude_names: continue
+        bwords = tokenize(row["beruf_name"].lower())
+        bstems = {w[:5] for w in bwords if len(w) >= 4}
+        last   = str(row["kldb_id"])[-1]
+        s = 0.0
+        if row["kldb_prefix2"] in sel_prefixes:
+            s += 2.5
+            if last in ("3","4"): s += 0.8
+        s += len(sel_stems & bstems) * 1.5
+        if s >= 2.0: scores[row["beruf_name"]] = s
+
+    ranked = sorted(scores.items(), key=lambda x: -x[1])[:n]
+    return [{"beruf_name":b,
+             "kldb_id": int(berufe_df[berufe_df["beruf_name"]==b]["kldb_id"].iloc[0]),
+             "kldb_prefix2": berufe_df[berufe_df["beruf_name"]==b]["kldb_prefix2"].iloc[0],
+             "score":s} for b,s in ranked]
+
+# ─── DATA ────────────────────────────────────────────────────────────────
 
 @st.cache_data
 def load_offers():
-    df = pd.read_csv(DATA / "offers.csv")
+    df = pd.read_csv(DATA/"offers.csv")
     for c in CAT_COLS:
-        if c in df.columns:
-            df[c] = df[c].fillna(False).astype(bool)
+        if c in df.columns: df[c] = df[c].fillna(False).astype(bool)
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
     return df
 
 @st.cache_data
 def load_demand():
-    df = pd.read_csv(DATA / "demand_2025.csv")
+    df = pd.read_csv(DATA/"demand_2025.csv")
     df["kldb_id"] = df["kldb_id"].astype(int)
     return df
 
 @st.cache_data
 def load_berufe():
-    df = pd.read_csv(DATA / "berufe.csv")
+    df = pd.read_csv(DATA/"berufe.csv")
     df["kldb_id"] = df["kldb_id"].astype(int)
     df["kldb_prefix2"] = df["kldb_id"].astype(str).str[:2]
     return df
 
 @st.cache_data
-def load_knowledge_groups():
-    with open(DATA / "knowledge_groups.json", encoding="utf-8") as f:
+def load_kgs():
+    with open(DATA/"knowledge_groups.json", encoding="utf-8") as f:
         return json.load(f)
 
-# ─── MATCHING LOGIC ──────────────────────────────────────────────────────
+# ─── HELPERS ─────────────────────────────────────────────────────────────
 
-def match_offers(offers, user_text, selected_cats, kg, n=50):
-    user_words = set(re.findall(r'\b\w{4,}\b', user_text.lower()))
-    user_stems = {w[:5] for w in user_words}
+def match_offers(offers, user_text, selected_cats, kg, n=60):
+    user_words = tokenize(user_text)
+    user_stems = {w[:5] for w in user_words if len(w) >= 4}
     scores = []
     for _, row in offers.iterrows():
         s = 0.0
-        row_text = (str(row.get("title","")) + " " + str(row.get("description",""))).lower()
-        row_words = set(re.findall(r'\b\w{4,}\b', row_text))
-        row_stems = {w[:5] for w in row_words}
-        s += len(user_words & row_words) * 2.0
-        s += len(user_stems & row_stems) * 1.0
+        rt = (str(row.get("title",""))+" "+str(row.get("description",""))).lower()
+        rw = tokenize(rt); rs = {w[:5] for w in rw if len(w) >= 4}
+        s += len(user_words & rw) * 2.0
+        s += len(user_stems & rs) * 1.0
         for cat in selected_cats:
-            if row.get(cat, False):
-                s += 3.0
-        if kg and str(row.get("knowledgeGroup","")) == kg:
-            s += 2.0
+            if row.get(cat, False): s += 3.0
+        if kg and str(row.get("knowledgeGroup","")) == kg: s += 2.0
         scores.append(s)
-    offers = offers.copy()
-    offers["_score"] = scores
-    return offers[offers["_score"] > 0].sort_values("_score", ascending=False).head(n)
-
-def match_berufe_to_text(berufe_df, user_text, n=15):
-    user_words = set(re.findall(r'\b\w{4,}\b', user_text.lower()))
-    user_stems = {w[:5] for w in user_words}
-    scores = defaultdict(float)
-    for _, row in berufe_df.iterrows():
-        beruf_lower = row["beruf_name"].lower()
-        beruf_words = set(re.findall(r'\b\w{4,}\b', beruf_lower))
-        beruf_stems = {w[:5] for w in beruf_words}
-        s  = len(user_words & beruf_words) * 2.0
-        s += len(user_stems & beruf_stems) * 1.5
-        topic_words = KLDB_TOPICS.get(row["kldb_prefix2"], [])
-        for tw in topic_words:
-            for uw in user_words:
-                if tw in uw or uw in tw:
-                    s += 0.5
-                    break
-        if s > 0:
-            scores[row["beruf_name"]] = s
-    ranked = sorted(scores.items(), key=lambda x: -x[1])[:n]
-    result = []
-    for beruf, sc in ranked:
-        row = berufe_df[berufe_df["beruf_name"] == beruf].iloc[0]
-        result.append({"beruf_name": beruf, "kldb_id": int(row["kldb_id"]),
-                        "kldb_prefix2": row["kldb_prefix2"], "score": sc})
-    return result
-
-def expand_berufe(berufe_df, selected_names, all_selected_names, n=20):
-    """Find related professions. all_selected_names = everything already shown."""
-    sel_rows = berufe_df[berufe_df["beruf_name"].isin(selected_names)]
-    sel_prefixes = set(sel_rows["kldb_prefix2"].tolist())
-    sel_words = set()
-    for name in selected_names:
-        sel_words |= set(re.findall(r'\b\w{4,}\b', name.lower()))
-    sel_stems = {w[:5] for w in sel_words}
-    scores = defaultdict(float)
-    for _, row in berufe_df.iterrows():
-        if row["beruf_name"] in all_selected_names:
-            continue
-        bwords = set(re.findall(r'\b\w{4,}\b', row["beruf_name"].lower()))
-        bstems = {w[:5] for w in bwords}
-        if row["kldb_prefix2"] in sel_prefixes:
-            scores[row["beruf_name"]] += 3.0
-        scores[row["beruf_name"]] += len(sel_stems & bstems) * 1.5
-    ranked = sorted([(b, s) for b, s in scores.items() if s > 0], key=lambda x: -x[1])[:n]
-    result = []
-    for beruf, sc in ranked:
-        row = berufe_df[berufe_df["beruf_name"] == beruf].iloc[0]
-        result.append({"beruf_name": beruf, "kldb_id": int(row["kldb_id"]),
-                        "kldb_prefix2": row["kldb_prefix2"], "score": sc})
-    return result
-
-# ─── SCORING ─────────────────────────────────────────────────────────────
-
-def angebots_score(n):
-    if n == 0:  return 1,  "Kaum Angebot vorhanden — Lücke im Markt."
-    if n <= 3:  return 3,  "Sehr geringes Angebot — gute Marktchance."
-    if n <= 8:  return 5,  "Moderates Angebot — Differenzierung empfehlenswert."
-    if n <= 20: return 7,  "Angebot vorhanden — klares Profil nötig."
-    if n <= 40: return 9,  "Starkes Angebot — Nische oder USP wichtig."
-    return 10, "Sehr gesättigter Markt — Positionierung entscheidend."
-
-def nachfrage_score(demand, kldb_ids, region_names):
-    sub = demand[demand["kldb_id"].isin(kldb_ids) & demand["region"].isin(region_names)]
-    if sub.empty:
-        return 1, "Keine Nachfragedaten für diese Berufe."
-    median_growth = sub["percentage_diff_previous_year"].median()
-    total_jobs    = sub["total_jobs"].sum()
-    if pd.isna(median_growth):
-        return 3, "Unzureichende Daten."
-    growth_score = min(10, max(1, int((median_growth * 100 + 5) * 1.2)))
-    size_bonus   = min(2, math.log10(max(total_jobs, 1)) / 3)
-    final        = min(10, max(1, round(growth_score + size_bonus)))
-    trend = "wachsend" if median_growth > 0.05 else "stabil" if median_growth > -0.05 else "rückläufig"
-    return final, (f"Trend: {trend}  ·  Wachstum: {median_growth*100:+.1f}%  ·  "
-                   f"Gesamtstellen: {int(total_jobs):,}")
-
-# ─── UI HELPERS ──────────────────────────────────────────────────────────
+    o2 = offers.copy(); o2["_score"] = scores
+    return o2[o2["_score"]>0].sort_values("_score", ascending=False).head(n)
 
 def score_badge(score, label):
-    color = "#0f6e56" if score <= 4 else "#854f0b" if score <= 7 else "#9b1c1c"
-    bg    = "#e1f5ee" if score <= 4 else "#faeeda" if score <= 7 else "#fee2e2"
+    c = "#0f6e56" if score<=4 else "#854f0b" if score<=7 else "#9b1c1c"
+    bg= "#e1f5ee" if score<=4 else "#faeeda" if score<=7 else "#fee2e2"
     st.markdown(
         f'<div style="display:inline-flex;align-items:center;gap:12px;'
         f'background:{bg};border-radius:10px;padding:12px 20px;margin:6px 0">'
-        f'<span style="font-size:2.2rem;font-weight:700;color:{color};line-height:1">{score}/10</span>'
-        f'<span style="color:{color};font-size:0.9rem;max-width:300px;line-height:1.4">{label}</span></div>',
-        unsafe_allow_html=True,
-    )
+        f'<span style="font-size:2rem;font-weight:700;color:{c};line-height:1">{score}/10</span>'
+        f'<span style="color:{c};font-size:.9rem;line-height:1.4">{label}</span></div>',
+        unsafe_allow_html=True)
 
-def beruf_selector(label, options, default_selected, key):
-    """
-    Full-width portrait selector for Berufsgruppen.
-    Returns list of selected names.
-    """
-    st.markdown(f"**{label}**")
-    st.caption("Bitte auswählen, welche Berufsgruppen für Ihren Kurs relevant sind.")
+def angebots_score(n):
+    if n==0:   return 1,"Kaum Angebot vorhanden — Lücke im Markt."
+    if n<=3:   return 3,"Sehr geringes Angebot — gute Marktchance."
+    if n<=8:   return 5,"Moderates Angebot — Differenzierung empfehlenswert."
+    if n<=20:  return 7,"Angebot vorhanden — klares Profil nötig."
+    if n<=40:  return 9,"Starkes Angebot — Nische oder USP wichtig."
+    return 10,"Sehr gesättigter Markt — Positionierung entscheidend."
 
-    if key not in st.session_state:
-        st.session_state[key] = set(default_selected)
+def nachfrage_score(demand, kldb_ids, region_names):
+    sub = demand[demand["kldb_id"].isin(kldb_ids) & demand["region"].isin(region_names)]
+    if sub.empty: return 1,"Keine Nachfragedaten für diese Berufe."
+    mg = sub["percentage_diff_previous_year"].median()
+    tj = sub["total_jobs"].sum()
+    if pd.isna(mg): return 3,"Unzureichende Daten."
+    gs = min(10,max(1,int((mg*100+5)*1.2)))
+    sb = min(2,math.log10(max(tj,1))/3)
+    f  = min(10,max(1,round(gs+sb)))
+    trend = "wachsend" if mg>0.05 else "stabil" if mg>-0.05 else "rückläufig"
+    return f,f"Trend: {trend}  ·  Wachstum: {mg*100:+.1f}%  ·  Gesamtstellen: {int(tj):,}"
 
-    selected = st.session_state[key]
+# ─── SECTIONS ────────────────────────────────────────────────────────────
 
-    # Render as full-width toggle buttons in a single column
-    cols_per_row = 1 if len(options) <= 10 else 2
-    rows = [options[i:i+cols_per_row] for i in range(0, len(options), cols_per_row)]
-
-    for row_items in rows:
-        cols = st.columns(cols_per_row)
-        for col, beruf in zip(cols, row_items):
-            is_sel = beruf in selected
-            bg = "#e1f5ee" if is_sel else "transparent"
-            border = "#0f6e56" if is_sel else "#ccc"
-            check = "Ausgewählt" if is_sel else "Hinzufügen"
-            if col.button(
-                f"{'[x] ' if is_sel else '[ ] '}{beruf}",
-                key=f"{key}_{beruf}",
-                use_container_width=True,
-            ):
-                if beruf in selected:
-                    selected.discard(beruf)
-                else:
-                    selected.add(beruf)
-                st.session_state[key] = selected
-                st.rerun()
-
-    return list(st.session_state[key])
-
-# ─── PHASE 0: ECKPUNKTE ──────────────────────────────────────────────────
+def section_header(color_hex, label):
+    st.markdown(
+        f'<div style="background:{color_hex};border-radius:8px;'
+        f'padding:8px 16px;margin-bottom:1rem">'
+        f'<span style="font-size:1.1rem;font-weight:600;color:#1a1a1a">{label}</span>'
+        f'</div>', unsafe_allow_html=True)
 
 def phase_0(kgs):
-    st.header("Schritt 1: Kursidee beschreiben")
+    # ── Kursbeschreibung ──────────────────────────────────────────────
+    section_header("#dceefb", "1. Kursbeschreibung")
+    with st.container():
+        c1, c2 = st.columns([3,2])
+        with c1:
+            title = st.text_input("Kurstitel",
+                placeholder="z.B. KI in der Automobilindustrie — Zertifikatskurs")
+            description = st.text_area("Kurzbeschreibung / Lernziele",
+                placeholder="Was lernen die Teilnehmer? Welche Kompetenzen werden vermittelt?",
+                height=110)
+            keywords = st.text_input("Weitere Stichworte (optional)",
+                placeholder="z.B. Machine Learning, Fahrzeugdaten, ADAS")
+        with c2:
+            kg = st.selectbox("Wissensgebiet",["(bitte wählen)"]+kgs)
+            selected_cats = st.multiselect(
+                "Thematische Schwerpunkte (optional, Mehrfachnennung möglich)",
+                options=list(CAT_LABELS.keys()),
+                format_func=lambda x: CAT_LABELS[x])
+            fmt = st.selectbox("Format",
+                ["Online / Digital","Hybrid / Blended","Präsenz","Noch offen"])
+            degree = st.selectbox("Abschluss", [
+                "Zertifikat / Hochschulzertifikat",
+                "Microcredential (digitales Badge / Teilleistung)",
+                "Teilnahmebescheinigung",
+                "Bachelor",
+                "Master",
+                "Abschlussprüfung",
+                "Sonstiges",
+            ])
+            c3, c4, c5 = st.columns(3)
+            ects  = c3.number_input("ECTS",min_value=0,max_value=120,value=5)
+            hours = c4.number_input("Workload (Std.)",min_value=0,value=60,step=10)
+            months= c5.number_input("Dauer (Monate)",min_value=1,value=3)
 
-    c1, c2 = st.columns([3, 2])
-    with c1:
-        title = st.text_input(
-            "Kurstitel (Idee oder Arbeitstitel)",
-            placeholder="z.B. Zertifikatskurs Digitale Verwaltung für Kommunen",
-        )
-        description = st.text_area(
-            "Kurzbeschreibung / Lernziele",
-            placeholder="Was sollen Teilnehmer lernen? Welche Kompetenzen werden vermittelt?",
-            height=110,
-        )
-        keywords = st.text_input(
-            "Weitere Stichworte (optional)",
-            placeholder="z.B. DSGVO, Datenschutz, E-Government",
-        )
-    with c2:
-        kg = st.selectbox("Wissensgebiet", ["(bitte wählen)"] + kgs)
-        selected_cats = st.multiselect(
-            "Thematische Schwerpunkte",
-            options=list(CAT_LABELS.keys()),
-            format_func=lambda x: CAT_LABELS[x],
-        )
-        fmt = st.selectbox("Format",
-            ["Online / Digital", "Hybrid / Blended", "Präsenz", "Noch offen"])
-        degree = st.selectbox("Abschluss",
-            ["Zertifikat","Microcredential","Hochschulzertifikat",
-             "Weiterbildungsmaster","Sonstiges"])
+    st.write("")
+    # ── Kosteninputs ─────────────────────────────────────────────────
+    section_header("#ede0f5", "2. Kosteninputs für Preiskalkulation")
+    with st.container():
+        cc1, cc2, cc3, cc4, cc5 = st.columns(5)
+        dev_h     = cc1.number_input("Entwicklungsstunden",value=40,step=5)
+        dev_rate  = cc2.number_input("Satz Entw. (EUR/h)",value=80,step=5)
+        impl_h    = cc3.number_input("Impl.-Stunden",value=20,step=5)
+        impl_rate = cc4.number_input("Satz Impl. (EUR/h)",value=60,step=5)
+        sachkosten= cc5.number_input("Sachkosten/TN (EUR)",value=50,step=10)
+        sc1, sc2  = st.columns(2)
+        overhead  = sc1.number_input("Overhead (%)",value=10.0,step=1.0)/100
+        target_tn = sc2.number_input("Geplante Teilnehmerzahl",min_value=1,value=15,step=5)
 
-    st.write("---")
-    c3, c4, c5, c6 = st.columns(4)
-    ects       = c3.number_input("ECTS", min_value=0, max_value=120, value=5)
-    hours      = c4.number_input("Workload (Stunden)", min_value=0, value=60, step=10)
-    months     = c5.number_input("Dauer (Monate)", min_value=1, value=3)
-    target_tn  = c6.number_input("Geplante TN-Zahl", min_value=1, value=15, step=5)
-
-    with st.expander("Kosteninputs für Preiskalkulation (optional)"):
-        cc1, cc2, cc3, cc4 = st.columns(4)
-        dev_h      = cc1.number_input("Entwicklungsstunden", value=40, step=5)
-        dev_rate   = cc2.number_input("Stundensatz Entwicklung (EUR)", value=80, step=5)
-        impl_h     = cc3.number_input("Implementierungsstunden", value=20, step=5)
-        impl_rate  = cc4.number_input("Stundensatz Impl. (EUR)", value=60, step=5)
-        sc1, sc2   = st.columns(2)
-        sachkosten = sc1.number_input("Sachkosten pro TN (EUR)", value=50, step=10)
-        overhead   = sc2.number_input("Overhead (%)", value=10.0, step=1.0) / 100
-
-    return {
-        "title": title, "description": description, "keywords": keywords,
-        "user_text": f"{title} {description} {keywords}".strip(),
-        "kg": kg if kg != "(bitte wählen)" else "",
-        "selected_cats": selected_cats, "format": fmt, "degree": degree,
-        "ects": ects, "hours": hours, "months": months, "target_tn": target_tn,
-        "dev_h": dev_h, "dev_rate": dev_rate, "impl_h": impl_h,
-        "impl_rate": impl_rate, "sachkosten": sachkosten, "overhead": overhead,
-    }
-
-# ─── PHASE 1: ANGEBOT ────────────────────────────────────────────────────
+    return {"title":title,"description":description,"keywords":keywords,
+            "user_text":f"{title} {description} {keywords}".strip(),
+            "kg":kg if kg!="(bitte wählen)" else "",
+            "selected_cats":selected_cats,"format":fmt,"degree":degree,
+            "ects":ects,"hours":hours,"months":months,"target_tn":target_tn,
+            "dev_h":dev_h,"dev_rate":dev_rate,"impl_h":impl_h,
+            "impl_rate":impl_rate,"sachkosten":sachkosten,"overhead":overhead}
 
 def phase_1(offers, params):
-    st.header("Schritt 2: Angebot analysieren")
+    section_header("#d4edda", "3. Angebot — wie viel gibt es bereits?")
     if not params["user_text"].strip():
-        st.info("Bitte erst Kurstitel und Beschreibung eingeben.")
-        return None
+        st.info("Bitte Kurstitel und Beschreibung eingeben."); return None
 
-    with st.spinner("Ähnliche Angebote werden gesucht..."):
+    with st.spinner("Suche ähnliche Angebote..."):
         matched = match_offers(offers, params["user_text"],
                                params["selected_cats"], params["kg"])
 
     score, score_text = angebots_score(len(matched))
-    col_sc, col_info = st.columns([1, 3])
+    col_sc, col_info = st.columns([1,3])
     with col_sc:
-        st.markdown("**Angebots-Score**")
         score_badge(score, score_text)
     with col_info:
-        st.markdown(f"{len(matched)} ähnliche Angebote von {len(offers):,} gefunden. "
-                    f"Score 1 = wenig Wettbewerb, 10 = stark gesättigter Markt.")
-
-    st.write("---")
+        st.write(f"{len(matched)} ähnliche Angebote von {len(offers):,} gefunden. "
+                 f"Score 1 = wenig Wettbewerb, Score 10 = stark gesättigter Markt.")
 
     tab_local, tab_regional, tab_national = st.tabs([
-        "Lokal (TH Wildau Region)",
-        "Regional (Berlin-Brandenburg)",
+        "Lokal — TH Wildau Region",
+        "Regional — Berlin & Brandenburg",
         "National",
     ])
 
-    def show_tab(df_geo, geo_label):
-        online = matched[matched["format"].str.contains(
+    # Controls above the tabs
+    ctrl1, ctrl2 = st.columns([1, 4])
+    n_display = ctrl1.selectbox("Angebote anzeigen", [10, 20], index=0, key="n_display")
+
+    # Per-tab deselect state
+    if "deselected" not in st.session_state:
+        st.session_state.deselected = set()
+
+    def show_tab(geo_filter, geo_label, tab_key):
+        geo_courses = matched[matched["geo_tier"].isin(geo_filter)]
+        online      = matched[matched["format"].str.contains(
             "Digital|Online|Combined|Blended|Fern", case=False, na=False)]
-        combined = pd.concat([df_geo, online]).drop_duplicates(subset=["id"])
-        st.caption(f"{len(combined)} Angebote ({len(df_geo)} {geo_label} + {len(online)} online/flexibel)")
+        combined    = pd.concat([geo_courses, online]).drop_duplicates(subset=["id"])
+
+        st.caption(f"{len(combined)} Angebote "
+                   f"({len(geo_courses)} {geo_label} + {len(online)} online/flexibel)")
+
         if combined.empty:
-            st.info("Keine passenden Angebote für diese Region.")
-            return
+            st.info("Keine passenden Angebote für diese Region."); return
 
-        priced = combined.dropna(subset=["price"])
-        if len(priced) >= 3:
-            fig = px.box(priced, y="price", points="outliers",
-                title="Preisverteilung ähnlicher Kurse",
-                labels={"price": "Preis (EUR)"},
-                color_discrete_sequence=["#185fa5"], height=280)
-            fig.update_layout(margin=dict(t=40, b=10))
-            st.plotly_chart(fig, use_container_width=True)
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Median", f"{priced['price'].median():,.0f} EUR")
-            m2.metric("25. Perz.", f"{priced['price'].quantile(0.25):,.0f} EUR")
-            m3.metric("75. Perz.", f"{priced['price'].quantile(0.75):,.0f} EUR")
+        # Build display table
+        top_n = combined.head(n_display).copy()
 
-        st.subheader("Top 10 ähnliche Angebote")
-        top10 = combined.head(10).copy()
-
-        def format_price(row):
-            if row.get("price_band") and str(row.get("price_band","")) in PREIS_LABELS:
-                return PREIS_LABELS[str(row["price_band"])]
-            if pd.notna(row.get("price")):
-                return f"{row['price']:,.0f} EUR"
+        def fmt_price(row):
+            pb = str(row.get("price_band",""))
+            if pb in PREIS_LABELS: return PREIS_LABELS[pb]
+            if pd.notna(row.get("price")): return f"{row['price']:,.0f} EUR"
             return "k.A."
 
-        def format_link(row):
+        def fmt_link(row):
             url = str(row.get("url",""))
             if url.startswith("http"):
-                label = "Kurs aufrufen" if "hochschulweiterbildung" in url else "Anbieter"
-                return f'<a href="{url}" target="_blank">{label}</a>'
+                label = "Kurs" if "hochschulweiterbildung" in url else "Anbieter"
+                return f'<a href="{url}" target="_blank">{label} &rarr;</a>'
             return "—"
 
-        top10["Preis_fmt"]  = top10.apply(format_price, axis=1)
-        top10["Link_fmt"]   = top10.apply(format_link, axis=1)
+        def fmt_source(row):
+            if row.get("source") == "hochundweit":
+                return '<span style="background:#dceefb;color:#0c3a6b;padding:2px 8px;border-radius:4px;font-size:12px">Hochschule</span>'
+            return '<span style="background:#faeeda;color:#6b3000;padding:2px 8px;border-radius:4px;font-size:12px">Weiterbildung</span>'
 
-        st.write(
-            top10[["title","provider","format","Preis_fmt","Link_fmt"]]
-            .rename(columns={"title":"Titel","provider":"Anbieter",
-                              "format":"Format","Preis_fmt":"Preis","Link_fmt":"Link"})
-            .to_html(escape=False, index=False),
-            unsafe_allow_html=True,
-        )
+        top_n["_Quelle"]  = top_n.apply(fmt_source, axis=1)
+        top_n["_Preis"]   = top_n.apply(fmt_price, axis=1)
+        top_n["_Link"]    = top_n.apply(fmt_link, axis=1)
+        top_n["_Umfang"]  = top_n["umfang"].fillna("").apply(
+            lambda x: x if x else "k.A.")
+
+        # Show table with deselect checkboxes
+        st.markdown("**Vergleichsangebote** — Haken entfernen, um Angebote aus der Statistik auszuschließen:")
+
+        # HTML table with coloured source badges
+        rows_html = []
+        active_ids = []
+        for _, row in top_n.iterrows():
+            rid = str(row["id"])
+            is_active = rid not in st.session_state.deselected
+            if is_active:
+                active_ids.append(rid)
+            chk_key = f"chk_{tab_key}_{rid}"
+            checked = st.checkbox(
+                f"{row['title'][:65]}  |  {row['provider'][:30]}  |  {row['_Umfang']}  |  {row['_Preis']}",
+                value=is_active,
+                key=chk_key,
+            )
+            if not checked and rid not in st.session_state.deselected:
+                st.session_state.deselected.add(rid)
+                st.rerun()
+            elif checked and rid in st.session_state.deselected:
+                st.session_state.deselected.discard(rid)
+                st.rerun()
+
+        # Statistics based on active (non-deselected) rows only
+        active_df  = combined[~combined["id"].astype(str).isin(st.session_state.deselected)]
+        priced_act = active_df.dropna(subset=["price"])
+        n_desel    = len(combined) - len(active_df)
+
+        if n_desel > 0:
+            st.caption(f"{n_desel} Angebot(e) aus der Statistik ausgeschlossen.")
+
+        if len(priced_act) >= 3:
+            st.markdown("**Preisstatistik** (basierend auf ausgewählten Angeboten):")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Median",    f"{priced_act['price'].median():,.0f} EUR")
+            m2.metric("25. Perz.", f"{priced_act['price'].quantile(.25):,.0f} EUR")
+            m3.metric("75. Perz.", f"{priced_act['price'].quantile(.75):,.0f} EUR")
+        elif len(active_df) > 0:
+            st.caption("Zu wenige Preisangaben für Statistik.")
+
+        # Source legend
+        st.markdown(
+            '<div style="margin-top:8px;font-size:12px">' +
+            '<span style="background:#dceefb;color:#0c3a6b;padding:2px 8px;border-radius:4px">Hochschule</span> ' +
+            '= hochundweit.de &nbsp;&nbsp;' +
+            '<span style="background:#faeeda;color:#6b3000;padding:2px 8px;border-radius:4px">Weiterbildung</span> ' +
+            '= mein-now.de</div>',
+            unsafe_allow_html=True)
 
     with tab_local:
-        show_tab(matched[matched["geo_tier"] == "wildau"], "lokale")
+        show_tab(["wildau"], "lokale", "local")
     with tab_regional:
-        show_tab(matched[matched["geo_tier"].isin(["berlin_bb","wildau"])], "BB/Berlin")
+        show_tab(["wildau","berlin_bb"], "Berlin/BB", "regional")
     with tab_national:
-        show_tab(matched, "nationale")
+        show_tab(["wildau","berlin_bb","national","national_flex"], "alle", "national")
 
     return matched
 
-# ─── PHASE 2: NACHFRAGE ──────────────────────────────────────────────────
-
 def phase_2(berufe_df, demand, params):
-    st.header("Schritt 3: Nachfrage und Zielgruppe")
+    section_header("#fff0d4", "4. Nachfrage — wer braucht diesen Kurs?")
     if not params["user_text"].strip():
-        st.info("Bitte erst Kurstitel und Beschreibung eingeben.")
-        return []
+        st.info("Bitte Kurstitel und Beschreibung eingeben."); return []
 
-    # ── 3a: Initial suggestions ──────────────────────────────────────
-    st.subheader("3a. Mögliche Zielgruppen-Berufe")
+    # ── State init ────────────────────────────────────────────────────
+    if "confirmed_berufe" not in st.session_state:
+        st.session_state.confirmed_berufe = set()
+    if "last_input" not in st.session_state:
+        st.session_state.last_input = ""
+
+    # Recompute initial suggestions if input changed
+    current_input = params["user_text"]
+    if current_input != st.session_state.last_input:
+        st.session_state.last_input = current_input
+        st.session_state.confirmed_berufe = set()
+
+    # Get initial suggestions
+    initial_suggestions = match_berufe(berufe_df, current_input, n=15)
+    initial_names = [s["beruf_name"] for s in initial_suggestions]
+
+    # Get expansions based on confirmed selections
+    confirmed = st.session_state.confirmed_berufe
+    expanded_names = []
+    if confirmed:
+        expansions = expand_berufe(berufe_df, list(confirmed),
+                                   initial_names + list(confirmed), n=15)
+        expanded_names = [e["beruf_name"] for e in expansions]
+
+    # All options to show = initial + expanded (no duplicates)
+    all_options = initial_names + [n for n in expanded_names if n not in initial_names]
+
+    # ── Instruction ───────────────────────────────────────────────────
     st.write(
-        "Das Werkzeug hat anhand Ihres Kurstitels und Ihrer Beschreibung die folgenden "
-        "Berufsbilder als potenzielle Zielgruppen identifiziert. "
-        "Bitte wählen Sie die zutreffenden aus — und entfernen Sie alle, die nicht passen."
+        "Klicken Sie auf die Berufsgruppen, die von Ihrem Kurs profitieren könnten. "
+        "Bereits ausgewählte Berufe erscheinen grün. "
+        "Basierend auf Ihrer Auswahl werden weitere verwandte Berufsgruppen vorgeschlagen."
     )
-
-    suggestions = match_berufe_to_text(berufe_df, params["user_text"], n=15)
-    if not suggestions:
+    if not all_options:
         st.warning("Keine passenden Berufe gefunden. Bitte Beschreibung ergänzen.")
         return []
 
-    suggested_names = [s["beruf_name"] for s in suggestions]
+    # ── Clickable list ────────────────────────────────────────────────
+    changed = False
+    for beruf in all_options:
+        is_sel = beruf in confirmed
+        col_btn, col_badge = st.columns([5, 1])
+        with col_btn:
+            label = ("✓  " if is_sel else "    ") + beruf
+            is_expanded = beruf in expanded_names
+            border_color = "#0f6e56" if is_sel else "#1a5c9e" if is_expanded else "#ccc"
+            bg_color = "#e1f5ee" if is_sel else "#eaf2fb" if is_expanded else "#fafafa"
+            txt_color = "#085041" if is_sel else "#0c3a6b" if is_expanded else "#333"
+            st.markdown(
+                f'<div style="background:{bg_color};border:1.5px solid {border_color};'
+                f'border-radius:6px;padding:6px 14px;margin:2px 0;color:{txt_color};'
+                f'font-size:14px;line-height:1.4">{label}</div>',
+                unsafe_allow_html=True)
+        with col_badge:
+            if is_expanded and not is_sel:
+                st.caption("verwandt")
+            btn_label = "Entfernen" if is_sel else "Auswählen"
+            if st.button(btn_label, key=f"btn_{beruf}", use_container_width=True):
+                if is_sel:
+                    st.session_state.confirmed_berufe.discard(beruf)
+                else:
+                    st.session_state.confirmed_berufe.add(beruf)
+                changed = True
 
-    # Full-width multiselect — shows complete names
-    selected_initial = st.multiselect(
-        "Relevante Berufsgruppen (alle passenden anklicken):",
-        options=suggested_names,
-        default=suggested_names[:5],
-        key="ms_initial",
-    )
+    if changed:
+        st.rerun()
 
-    if not selected_initial:
-        st.info("Bitte mindestens eine Berufsgruppe auswählen, um fortzufahren.")
+    if not confirmed:
+        st.info("Bitte mindestens einen Beruf auswählen, um die Nachfrageanalyse zu starten.")
         return []
 
-    # Show selected as readable tags
-    st.markdown("**Ausgewählt:**")
-    tags_html = " ".join(
-        f'<span style="display:inline-block;background:#e1f5ee;color:#085041;'
-        f'border-radius:6px;padding:3px 10px;margin:2px;font-size:13px">{b}</span>'
-        for b in selected_initial
-    )
-    st.markdown(tags_html, unsafe_allow_html=True)
-
-    # ── 3b: Expand ───────────────────────────────────────────────────
+    # ── Demand analysis ───────────────────────────────────────────────
     st.write("---")
-    st.subheader("3b. Weitere verwandte Berufsgruppen")
-    st.write(
-        "Basierend auf Ihrer Auswahl wurden weitere verwandte Berufsbilder identifiziert. "
-        "Fügen Sie weitere hinzu, die für Ihren Kurs relevant sein könnten."
-    )
+    st.markdown(f"**Ausgewählt: {len(confirmed)} Berufsgruppen**")
+    tags = " ".join(
+        f'<span style="display:inline-block;background:#0f6e56;color:#fff;'
+        f'border-radius:5px;padding:3px 10px;margin:2px;font-size:13px">{b}</span>'
+        for b in sorted(confirmed))
+    st.markdown(tags, unsafe_allow_html=True)
+    st.write("")
 
-    expanded = expand_berufe(berufe_df, selected_initial, suggested_names, n=20)
-    expanded_names = [e["beruf_name"] for e in expanded]
-
-    selected_expanded = st.multiselect(
-        "Weitere Berufsgruppen hinzufügen (optional):",
-        options=expanded_names,
-        default=[],
-        key="ms_expanded",
-    )
-
-    all_selected = selected_initial + selected_expanded
-
-    # Summary of full target group
-    st.markdown(f"**Gesamte Zielgruppe: {len(all_selected)} Berufsbilder**")
-    all_tags = " ".join(
-        f'<span style="display:inline-block;background:#e6f1fb;color:#0c447c;'
-        f'border-radius:6px;padding:3px 10px;margin:2px;font-size:13px">{b}</span>'
-        for b in all_selected
-    )
-    st.markdown(all_tags, unsafe_allow_html=True)
-
-    # ── 3c: Demand analysis ──────────────────────────────────────────
-    st.write("---")
-    st.subheader("3c. Nachfrageentwicklung für Ihre Zielgruppe")
-
-    all_kldb = (
-        berufe_df[berufe_df["beruf_name"].isin(all_selected)]["kldb_id"]
-        .astype(int).tolist()
-    )
-
+    all_kldb = berufe_df[berufe_df["beruf_name"].isin(confirmed)]["kldb_id"].astype(int).tolist()
     demand_sub = demand[demand["kldb_id"].isin(all_kldb)]
 
     if demand_sub.empty:
-        st.warning(
-            "Keine Nachfragedaten für die gewählten Berufe gefunden. "
-            "Möglicherweise sind diese Berufsbilder in der Jobmonitor-Datenbank "
-            "unter einem anderen Namen erfasst."
-        )
+        st.warning("Keine Nachfragedaten für diese Berufsgruppen in der Jobmonitor-Datenbank.")
         return all_kldb
 
-    # Score
     local_regions = (REGIONS_DISPLAY["TH Wildau Region"] +
                      REGIONS_DISPLAY["Berlin"] + REGIONS_DISPLAY["Brandenburg"])
     nd_score, nd_text = nachfrage_score(demand_sub, all_kldb, local_regions)
 
-    col_sc2, col_info2 = st.columns([1, 3])
+    col_sc2, col_info2 = st.columns([1,3])
     with col_sc2:
-        st.markdown("**Nachfrage-Score**")
         score_badge(nd_score, nd_text)
     with col_info2:
         st.caption("Score 1 = geringe/sinkende Nachfrage  ·  Score 10 = stark wachsend")
 
-    # Regional bar chart
-    region_rows = []
-    for display_name, db_regions in REGIONS_DISPLAY.items():
-        sub = demand_sub[demand_sub["region"].isin(db_regions)]
-        if sub.empty:
-            continue
-        total    = sub["total_jobs"].sum()
-        diff     = sub["total_diff_previous_year"].sum()
-        prior    = total - diff
-        pct      = diff / prior if prior > 0 else 0
-        region_rows.append({"Region": display_name, "Stellen": int(total),
-                             "Wachstum_%": round(pct * 100, 1)})
+    # Regional chart
+    rrows = []
+    for dname, db_regs in REGIONS_DISPLAY.items():
+        sub = demand_sub[demand_sub["region"].isin(db_regs)]
+        if sub.empty: continue
+        total = sub["total_jobs"].sum()
+        diff  = sub["total_diff_previous_year"].sum()
+        prior = total - diff
+        pct   = diff / prior if prior > 0 else 0
+        rrows.append({"Region":dname,"Stellen":int(total),"Wachstum_%":round(pct*100,1)})
 
-    if region_rows:
-        rdf = pd.DataFrame(region_rows)
+    if rrows:
+        rdf = pd.DataFrame(rrows)
         rdf = rdf.set_index("Region").reindex(REGION_ORDER).dropna().reset_index()
-        rdf["Farbe"] = rdf["Wachstum_%"].apply(
-            lambda x: "#27ae60" if x > 5 else "#f39c12" if x > -5 else "#c0392b")
-        fig_bar = go.Figure()
-        fig_bar.add_trace(go.Bar(
+        colors = rdf["Wachstum_%"].apply(
+            lambda x: "#27ae60" if x>5 else "#f39c12" if x>-5 else "#c0392b")
+        fig = go.Figure(go.Bar(
             x=rdf["Region"], y=rdf["Wachstum_%"],
-            marker_color=rdf["Farbe"],
+            marker_color=colors,
             text=rdf["Wachstum_%"].apply(lambda x: f"{x:+.1f}%"),
-            textposition="outside",
-        ))
-        fig_bar.update_layout(
-            title="Nachfragewachstum 2024 → 2025 nach Region",
-            yaxis_title="Wachstum (%)",
-            xaxis_title="",
-            height=320,
-            margin=dict(t=50, b=20),
-            showlegend=False,
-        )
-        st.plotly_chart(fig_bar, use_container_width=True)
+            textposition="outside"))
+        fig.update_layout(title="Nachfragewachstum 2024 → 2025",
+                          yaxis_title="Wachstum (%)", height=300,
+                          margin=dict(t=50,b=20), showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(rdf[["Region","Stellen","Wachstum_%"]]
+                     .rename(columns={"Wachstum_%":"Wachstum (%)"}),
+                     use_container_width=True, hide_index=True)
 
-        # Absolute jobs table
-        st.dataframe(
-            rdf[["Region","Stellen","Wachstum_%"]]
-            .rename(columns={"Wachstum_%": "Wachstum (%)"}),
-            use_container_width=True, hide_index=True,
-        )
-
-    # Top growing professions
     st.markdown("**Top Berufe nach Wachstum — Berlin & Brandenburg**")
-    top_berufe = (
-        demand_sub[demand_sub["region"].isin(["Berlin","Brandenburg"])]
-        .groupby(["kldb_id","beruf_name"], as_index=False)
-        .agg(Stellen=("total_jobs","sum"),
-             Wachstum_pct=("percentage_diff_previous_year","mean"))
-        .sort_values("Wachstum_pct", ascending=False)
-        .head(15)
-    )
-    top_berufe["Wachstum"] = top_berufe["Wachstum_pct"].apply(
+    top = (demand_sub[demand_sub["region"].isin(["Berlin","Brandenburg"])]
+           .groupby(["kldb_id","beruf_name"], as_index=False)
+           .agg(Stellen=("total_jobs","sum"),
+                Wachstum_pct=("percentage_diff_previous_year","mean"))
+           .sort_values("Wachstum_pct", ascending=False).head(15))
+    top["Wachstum"] = top["Wachstum_pct"].apply(
         lambda x: f"{x*100:+.1f}%" if pd.notna(x) else "n/a")
-    top_berufe["Stellen"] = top_berufe["Stellen"].apply(lambda x: f"{int(x):,}")
-    st.dataframe(
-        top_berufe[["beruf_name","Stellen","Wachstum"]]
-        .rename(columns={"beruf_name": "Berufsbezeichnung"}),
-        use_container_width=True, hide_index=True,
-    )
+    top["Stellenausschreibungen"] = top["Stellen"].apply(lambda x: f"{int(x):,}")
+    st.dataframe(top[["beruf_name","Stellenausschreibungen","Wachstum"]]
+                 .rename(columns={"beruf_name":"Berufsbezeichnung",
+                                  "Wachstum":"Wachstum 2024 → 2025"}),
+                 use_container_width=True, hide_index=True)
 
     return all_kldb
 
-# ─── PHASE 3: PREISGESTALTUNG ────────────────────────────────────────────
+def phase_3(offers, params, matched):
+    section_header("#dce3ff", "5. Preisgestaltung")
+    priced_all = matched.dropna(subset=["price"]) if matched is not None and len(matched) > 0 else None
 
-def phase_3(offers, params, matched_offers):
-    st.header("Schritt 4: Preisgestaltung")
+    has_cost = params["dev_h"] > 0
+    if has_cost:
+        fix_net   = params["dev_h"]*params["dev_rate"] + params["impl_h"]*params["impl_rate"]
+        fix_gross = fix_net * (1 + params["overhead"])
+        be_preis  = ((fix_net / params["target_tn"]) + params["sachkosten"]) * (1 + params["overhead"])
 
-    priced_all = None
-    if matched_offers is not None and len(matched_offers) > 0:
-        priced_all = matched_offers.dropna(subset=["price"])
+        b1,b2,b3 = st.columns(3)
+        b1.metric("Gesamte Fixkosten (inkl. Overhead)", f"{fix_gross:,.0f} EUR")
+        b2.metric("Break-even-Preis pro TN",            f"{be_preis:,.0f} EUR")
+        b3.metric("Bei Zielauslastung",
+                  f"{params['target_tn']} TN")
 
-    # ── Break-even ────────────────────────────────────────────────────
-    has_cost_data = params["dev_h"] > 0
+        # Deckungsbeitrag chart
+        tn_max = max(params["target_tn"]*3, 40)
+        tn_range = list(range(1, tn_max+1))
+        price_points = [500, 1000, 2000, 5000, round(be_preis/100)*100]
+        price_points = sorted(set(p for p in price_points if p > 0))
 
-    if has_cost_data:
-        fixkosten_netto  = params["dev_h"] * params["dev_rate"] + params["impl_h"] * params["impl_rate"]
-        fixkosten_brutto = fixkosten_netto * (1 + params["overhead"])
-        be_preis = ((fixkosten_netto / params["target_tn"]) + params["sachkosten"]) * (1 + params["overhead"])
+        fig_be = go.Figure()
+        colors_line = ["#185fa5","#27ae60","#f39c12","#9b1c1c","#7f77dd"]
+        for i, preis in enumerate(price_points):
+            revenue = [t * (preis/(1+params["overhead"]) - params["sachkosten"]) - fix_net
+                       for t in tn_range]
+            label = f"{preis:,.0f} EUR/TN"
+            if abs(preis - be_preis) < 50: label += " (Break-even)"
+            fig_be.add_trace(go.Scatter(
+                x=tn_range, y=revenue, mode="lines", name=label,
+                line=dict(width=2.5, color=colors_line[i % len(colors_line)],
+                          dash="dash" if abs(preis-be_preis)<50 else "solid")))
 
-        b1, b2, b3 = st.columns(3)
-        b1.metric("Gesamte Fixkosten (inkl. Overhead)", f"{fixkosten_brutto:,.0f} EUR")
-        b2.metric("Break-even-Preis pro TN", f"{be_preis:,.0f} EUR")
-
-        # Break-even at different price points
-        price_points = [500, 1000, 2000, 3000, 5000, 8000, 10000, 15000]
-        be_data = []
-        for p in price_points:
-            denom = p / (1 + params["overhead"]) - params["sachkosten"]
-            if denom > 0:
-                tn = math.ceil(fixkosten_netto / denom)
-                be_data.append({"Preis pro TN (EUR)": p, "Benötigte TN": tn})
-
-        with b3:
-            st.markdown("**Min. TN für Break-even**")
-            for row in be_data[:5]:
-                st.caption(f"Bei {row['Preis pro TN (EUR)']:,} EUR → {row['Benötigte TN']} TN")
+        fig_be.add_hline(y=0, line_color="#333", line_width=1)
+        fig_be.add_hline(y=0, line_dash="dot", line_color="#c0392b", line_width=1.5,
+                         annotation_text="Kostendeckung", annotation_position="right")
+        fig_be.add_vline(x=params["target_tn"], line_dash="dash",
+                         line_color="#888", line_width=1,
+                         annotation_text=f"Ziel: {params['target_tn']} TN")
+        fig_be.update_layout(
+            title="Deckungsbeitrag je Preispunkt und Teilnehmerzahl",
+            xaxis_title="Teilnehmerzahl", yaxis_title="Ergebnis (EUR)",
+            height=400, margin=dict(t=50,b=80),
+            legend=dict(orientation="h", y=-0.25))
+        st.plotly_chart(fig_be, use_container_width=True)
+        st.caption("Oberhalb der Nulllinie ist der Kurs profitabel. "
+                   "Die gestrichelte Linie zeigt Ihren Break-even-Preis.")
 
         st.write("")
-
-        # Break-even chart (like the attached reference)
-        if be_data:
-            be_df = pd.DataFrame(be_data)
-            fig_be = go.Figure()
-
-            # Revenue lines at different TN counts
-            tn_range = list(range(1, max(params["target_tn"] * 2, 30) + 1))
-            for preis in [1000, 2000, 5000, be_preis]:
-                revenue = [t * preis / (1 + params["overhead"]) - params["sachkosten"] * t
-                           for t in tn_range]
-                label = f"{preis:,.0f} EUR/TN" + (" (Break-even)" if preis == be_preis else "")
-                fig_be.add_trace(go.Scatter(
-                    x=tn_range, y=revenue,
-                    mode="lines", name=label,
-                    line=dict(width=2, dash="dash" if preis == be_preis else "solid"),
-                ))
-
-            # Fixed cost line
-            fig_be.add_hline(y=fixkosten_netto, line_dash="dot",
-                             line_color="#c0392b", line_width=1.5,
-                             annotation_text="Fixkosten",
-                             annotation_position="right")
-
-            # Mark target TN
-            fig_be.add_vline(x=params["target_tn"], line_dash="dash",
-                             line_color="#888", line_width=1,
-                             annotation_text=f"Ziel: {params['target_tn']} TN",
-                             annotation_position="top right")
-
-            fig_be.update_layout(
-                title="Deckungsbeitrag je Teilnehmerzahl und Preispunkt",
-                xaxis_title="Teilnehmerzahl",
-                yaxis_title="Deckungsbeitrag (EUR)",
-                height=380,
-                legend=dict(orientation="h", y=-0.2),
-                margin=dict(t=50, b=80),
-            )
-            fig_be.add_hline(y=0, line_color="#333", line_width=0.5)
-            st.plotly_chart(fig_be, use_container_width=True)
-            st.caption(
-                "Die Linien zeigen den Deckungsbeitrag je Preispunkt in Abhängigkeit "
-                "der Teilnehmerzahl. Oberhalb der Fixkosten-Linie (gepunktet) ist der Kurs profitabel."
-            )
+        be_table = []
+        for p in [500,1000,2000,3000,5000,8000,10000,15000]:
+            d = p/(1+params["overhead"]) - params["sachkosten"]
+            if d > 0:
+                be_table.append({"Preis pro TN (EUR)": f"{p:,}",
+                                 "Benötigte TN für Break-even": math.ceil(fix_net/d)})
+        if be_table:
+            st.dataframe(pd.DataFrame(be_table), use_container_width=True, hide_index=True)
 
         st.write("---")
 
-    # ── Market pricing ────────────────────────────────────────────────
     st.subheader("Marktpreise ähnlicher Kurse")
-
     if priced_all is not None and len(priced_all) >= 3:
-        p25 = priced_all["price"].quantile(0.25)
+        p25 = priced_all["price"].quantile(.25)
         med = priced_all["price"].median()
-        p75 = priced_all["price"].quantile(0.75)
+        p75 = priced_all["price"].quantile(.75)
 
-        fig_mkt = px.box(
-            priced_all, y="price", points="outliers",
-            title="Preisverteilung ähnlicher Kurse — alle Regionen",
-            labels={"price": "Preis (EUR)"},
-            color_discrete_sequence=["#185fa5"], height=320,
-        )
-        if has_cost_data:
+        fig_mkt = px.box(priced_all, y="price", points="outliers",
+            title="Preisverteilung ähnlicher Kurse",
+            labels={"price":"Preis (EUR)"},
+            color_discrete_sequence=["#185fa5"], height=300)
+        if has_cost:
             fig_mkt.add_hline(y=be_preis, line_dash="dash", line_color="#c0392b",
                               annotation_text="Ihr Break-even",
                               annotation_position="top right")
-        fig_mkt.update_layout(margin=dict(t=50, b=10))
+        fig_mkt.update_layout(margin=dict(t=50,b=10))
         st.plotly_chart(fig_mkt, use_container_width=True)
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("25. Perzentil", f"{p25:,.0f} EUR")
-        col2.metric("Median", f"{med:,.0f} EUR")
-        col3.metric("75. Perzentil", f"{p75:,.0f} EUR")
-        col4.metric("Empfohlene Spanne", f"{p25:,.0f} – {p75:,.0f} EUR")
+        col1,col2,col3,col4 = st.columns(4)
+        col1.metric("25. Perz.",        f"{p25:,.0f} EUR")
+        col2.metric("Median",           f"{med:,.0f} EUR")
+        col3.metric("75. Perz.",        f"{p75:,.0f} EUR")
+        col4.metric("Empfohlene Spanne",f"{p25:,.0f} – {p75:,.0f} EUR")
 
-        if has_cost_data:
+        if has_cost:
             if be_preis < p25:
                 st.success(f"Ihr Break-even ({be_preis:,.0f} EUR) liegt unter dem 25. Perzentil — gute Spielräume.")
             elif be_preis < med:
-                st.info(f"Ihr Break-even ({be_preis:,.0f} EUR) liegt im unteren Marktbereich — realistische Kalkulation.")
+                st.info(f"Ihr Break-even ({be_preis:,.0f} EUR) liegt im unteren Marktbereich.")
             else:
                 st.warning(f"Ihr Break-even ({be_preis:,.0f} EUR) liegt über dem Marktmedian — Kostensenkung prüfen.")
     else:
-        st.info("Bitte erst Schritt 2 ausführen oder mehr Stichwörter eingeben, um Marktpreise zu berechnen.")
-
-# ─── FEEDBACK ────────────────────────────────────────────────────────────
+        st.info("Bitte Kurstitel und Beschreibung eingeben, um Marktpreise zu berechnen.")
 
 def feedback_section():
     st.write("---")
-    st.subheader("Feedback")
+    section_header("#f5f5f5", "Feedback")
+    st.markdown("Ihr Feedback hilft, das Werkzeug zu verbessern. Das Formular dauert ca. 2 Minuten:")
+    FORM_URL = ("https://docs.google.com/forms/d/1m-3oij-Lcb59ilQMUcHaRDS56fNFwi8J194jRNgxq64"
+                "/viewform?embedded=true")
     st.markdown(
-        "Hilft Ihnen dieses Werkzeug? Ihr Feedback verbessert zukünftige Versionen. "
-        "Das Formular dauert etwa 2 Minuten:"
-    )
-    FORM_URL = "https://docs.google.com/forms/d/e/PLACEHOLDER/viewform?embedded=true"
-    st.markdown(
-        f'<iframe src="{FORM_URL}" width="100%" height="520" '
+        f'<iframe src="{FORM_URL}" width="100%" height="560" '
         f'frameborder="0" marginheight="0" marginwidth="0">Wird geladen...</iframe>',
-        unsafe_allow_html=True,
-    )
+        unsafe_allow_html=True)
 
 # ─── MAIN ────────────────────────────────────────────────────────────────
 
@@ -730,40 +745,107 @@ def main():
     offers = load_offers()
     demand = load_demand()
     berufe = load_berufe()
-    kgs    = load_knowledge_groups()
+    kgs    = load_kgs()
 
     with st.sidebar:
         st.markdown("""
-        ## Weiterbildungs-Radar
-        ### TH Wildau
+## Weiterbildungs-Radar
+### TH Wildau
 
-        Dieses Werkzeug unterstützt Lehrende der TH Wildau dabei,
-        eine neue Weiterbildungsidee zu analysieren — bevor die
-        eigentliche Kursentwicklung beginnt.
+Dieses Werkzeug unterstützt Lehrende dabei, eine neue Weiterbildungsidee zu analysieren — bevor die eigentliche Kursentwicklung beginnt.
 
-        **Was das Werkzeug leistet:**
+---
 
-        - Wie viele ähnliche Kurse gibt es bereits — lokal, regional, national?
-        - Welche Berufsgruppen könnten von Ihrem Kurs profitieren, und wie stark wächst die Nachfrage nach diesen Berufen?
-        - Wie sind vergleichbare Kurse am Markt bepreist, und ab welcher Teilnehmerzahl rechnet sich Ihr Angebot?
+### Wie funktioniert die Suche?
 
-        **Datengrundlage:**
-        Die Angebotsdaten stammen aus hochundweit.de und mein-now.de (Stand 2025, über 13.000 Kurse).
-        Die Nachfragedaten basieren auf dem Jobmonitor der Bertelsmann Stiftung
-        (Stellenanzeigenanalyse 2024–2025, Regionen Berlin, Brandenburg,
-        Dahme-Spreewald, Oder-Spree, Teltow-Fläming).
+**Angebotssuche** — Das Werkzeug vergleicht Ihren Kurstitel und Ihre Beschreibung mit über 13.000 Kursen aus hochundweit.de und mein-now.de. Die Ähnlichkeit wird über Schlagwortabgleich berechnet: übereinstimmende Wörter und Wortstämme erhöhen die Punktzahl. Zusätzlich werden thematische Schwerpunkte (PGT/QST) berücksichtigt, wenn Sie diese auswählen. Je mehr Beschreibungstext Sie eingeben, desto besser die Ergebnisse.
 
-        **Hinweis:** Dieses Werkzeug ist ein Prototyp. Alle Ergebnisse sind
-        Orientierungswerte und ersetzen keine vollständige Marktanalyse.
+**Kategorisierung (PGT/QST)** — Kurse sind in zwei Systemen kategorisiert. Die *Profilgebenden Themen (PGT)* unterscheiden zwischen Verwaltung, Mobilität und Wertschöpfung. Die *Querschnittsthemen (QST)* erfassen übergreifende Dimensionen wie Nachhaltigkeit, Diversity und Internationalisation. Ein Kurs kann mehrere Kategorien haben. Die Kategorisierung basiert auf einem regelbasierten Schlüsselwortsystem.
 
-        ---
+**Angebots-Score** — Der Score (1–10) gibt an, wie stark der Markt mit ähnlichen Kursen besetzt ist. Er basiert auf der Anzahl der Treffer: 0 Treffer = Score 1 (Marktlücke), über 40 Treffer = Score 10 (sehr gesättigt). Der Score ist kein absolutes Qualitätsurteil — ein Score von 7 bedeutet, dass Differenzierung wichtig ist, nicht dass der Kurs nicht sinnvoll wäre.
+
+---
+
+### Wie funktioniert die Berufssuche?
+
+Das Werkzeug gleicht Ihren Text mit 1.210 Berufsbezeichnungen aus der KldB-Systematik (Klassifikation der Berufe, Bundesagentur für Arbeit) ab. Dabei werden drei Methoden kombiniert:
+
+1. **Direkte Wortübereinstimmung** — z.B. "Automatisierung" trifft auf Berufe, die dieses Wort im Namen tragen.
+2. **Stammabgleich** — die ersten fünf Buchstaben werden verglichen, damit "Maschinenbau" auch "Maschinenbauer" findet.
+3. **Konzept-Mapping** — Fachbegriffe wie "KI", "DSGVO" oder "Supply Chain" werden auf die passenden KldB-Berufsgruppen gemappt (z.B. KI → Informatikberufe, DSGVO → Rechts- und Verwaltungsberufe), da diese Begriffe meist nicht direkt in Berufsbezeichnungen vorkommen.
+
+Nur Berufe ab Spezialistenniveau (KldB-Endziffer 3 oder 4) werden angezeigt.
+
+**Nachfrage-Score** — Der Score (1–10) basiert auf dem medianen prozentualen Wachstum der Stellenanzeigen für die gewählten Berufe in der Region (2024→2025) plus einem Größenbonus für absolute Stellenzahlen. Score 1 = sinkende oder keine Nachfrage, Score 10 = stark wachsende Nachfrage.
+
+---
+
+### Wie wird der Preis berechnet?
+
+**Break-even-Preis** = ((Entwicklungskosten + Implementierungskosten) / Teilnehmerzahl + Sachkosten pro TN) × (1 + Overhead-Zuschlag)
+
+Der Deckungsbeitrags-Chart zeigt, ab wie vielen Teilnehmern verschiedene Preispunkte die Fixkosten decken. Die Marktpreisverteilung zeigt Median, 25. und 75. Perzentil ähnlicher Kurse aus der Datenbank.
+
+---
+
+**Datenquellen**
+
+Angebotsdaten: hochundweit.de und mein-now.de (Stand 2025, über 13.000 Kurse).
+
+Nachfragedaten: Jobmonitor der Bertelsmann Stiftung, Stellenanzeigenanalyse 2024–2025, Regionen Berlin, Brandenburg, Dahme-Spreewald, Oder-Spree, Teltow-Fläming.
+
+---
+
+*Dieser Prototyp dient zur Orientierung. Alle Ergebnisse ersetzen keine vollständige Marktanalyse.*
+
+---
         """)
         st.caption("Version 1.0 · TH Wildau 2025")
 
     st.title("Weiterbildungs-Radar")
     st.markdown(
-        "Analysieren Sie Angebot, Nachfrage und Preisgestaltung für Ihre Weiterbildungsidee."
+        "Analysieren Sie Angebot, Nachfrage und Preisgestaltung für Ihre Weiterbildungsidee. "
+        "Geben Sie Ihren Kurstitel und eine kurze Beschreibung ein — das Werkzeug führt Sie "
+        "durch drei Analyseschritte."
     )
+
+    st.markdown("""
+<div style="display:flex;gap:16px;margin:1rem 0 1.5rem 0;flex-wrap:wrap">
+
+<div style="flex:1;min-width:220px;background:#e8f4fd;border-radius:10px;padding:1rem 1.2rem;border-top:4px solid #185fa5">
+<div style="font-size:1rem;font-weight:700;color:#0c3a6b;margin-bottom:6px">Schritt 1 &nbsp; Angebot</div>
+<div style="font-size:13px;color:#1a3a5c;line-height:1.6">
+Wie viele ähnliche Kurse gibt es bereits? Das Werkzeug durchsucht über 13.000 Weiterbildungsangebote
+aus ganz Deutschland und filtert nach Ihrer Region — lokal (TH Wildau Umgebung),
+regional (Berlin &amp; Brandenburg) und national. Sie erhalten einen <strong>Angebots-Score</strong>
+(1–10), der zeigt, wie gesättigt der Markt ist: ein niedriger Score bedeutet eine Marktlücke,
+ein hoher Score bedeutet starken Wettbewerb. Die Kurse werden nach inhaltlicher Ähnlichkeit zu
+Ihrer Idee sortiert und mit Preisangaben und Links angezeigt.
+</div></div>
+
+<div style="flex:1;min-width:220px;background:#fff4e6;border-radius:10px;padding:1rem 1.2rem;border-top:4px solid #c77700">
+<div style="font-size:1rem;font-weight:700;color:#6b3800;margin-bottom:6px">Schritt 2 &nbsp; Nachfrage</div>
+<div style="font-size:13px;color:#4a2800;line-height:1.6">
+Welche Berufsgruppen würden von Ihrem Kurs profitieren, und wächst die Nachfrage nach
+diesen Berufen? Das Werkzeug schlägt passende Berufsbilder vor — Sie wählen die relevanten aus.
+Je mehr Sie auswählen, desto mehr verwandte Berufe werden vorgeschlagen. Auf Basis der
+Jobmonitor-Daten der Bertelsmann Stiftung (Stellenanzeigenanalyse 2024–2025) erhalten Sie
+einen <strong>Nachfrage-Score</strong> (1–10) sowie eine Übersicht über das Wachstum in
+Berlin, Brandenburg und der TH Wildau Region.
+</div></div>
+
+<div style="flex:1;min-width:220px;background:#ede8ff;border-radius:10px;padding:1rem 1.2rem;border-top:4px solid #5b3fd4">
+<div style="font-size:1rem;font-weight:700;color:#2d1a7a;margin-bottom:6px">Schritt 3 &nbsp; Preisgestaltung</div>
+<div style="font-size:13px;color:#1e1050;line-height:1.6">
+Was können Sie für den Kurs verlangen? Wenn Sie Ihre Kostenstruktur eingeben
+(Entwicklungsstunden, Stundensätze, Sachkosten), berechnet das Werkzeug Ihren
+<strong>Break-even-Preis</strong> und zeigt, wie viele Teilnehmer bei verschiedenen
+Preispunkten benötigt werden. Die Marktpreisverteilung ähnlicher Kurse zeigt, ob Ihre
+Kalkulation realistisch ist.
+</div></div>
+
+</div>
+""", unsafe_allow_html=True)
 
     params = phase_0(kgs)
 
@@ -777,7 +859,6 @@ def main():
         feedback_section()
     else:
         st.info("Geben Sie einen Kurstitel und eine Beschreibung ein, um zu starten.")
-
 
 if __name__ == "__main__":
     main()
