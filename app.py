@@ -725,7 +725,7 @@ def feedback_section():
         "Das Formular dauert ca. 2 Minuten:"
     )
     # Embed a Google Form — replace with your form ID
-    FORM_URL = "https://docs.google.com/forms/d/e/PLACEHOLDER/viewform?embedded=true"
+    FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSdGl3Q2Uv8b-HRzf1zVNNVEJmluT7Ky6uNhlOmEJ-vn-BVFLQ/viewform?usp=publish-editor"
     st.markdown(
         f'<iframe src="{FORM_URL}" width="100%" height="520" '
         f'frameborder="0" marginheight="0" marginwidth="0">'
