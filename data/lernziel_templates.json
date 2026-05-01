@@ -1,0 +1,50 @@
+{
+  "PGT_effektive_Verwaltung": [
+    "Rechtliche Grundlagen und Compliance-Anforderungen kennen und anwenden",
+    "Verwaltungsprozesse analysieren und optimieren",
+    "Datenschutz und IT-Sicherheit in der Praxis umsetzen",
+    "Buchführung, Bilanzierung und steuerliche Grundlagen beherrschen",
+    "Personalrecht und Arbeitsrecht sicher anwenden"
+  ],
+  "PGT_effektive_Verwaltung_oeffentlich": [
+    "Strukturen und Prozesse der öffentlichen Verwaltung kennen",
+    "Vergaberecht und öffentliche Beschaffung korrekt anwenden",
+    "E-Government-Lösungen konzipieren und einführen",
+    "Kommunale Entscheidungsprozesse verstehen und gestalten"
+  ],
+  "PGT_zukunftsfaehige_Mobilitaet": [
+    "Technologien der Elektro- und Wasserstoffmobilität bewerten",
+    "Verkehrsplanung und intermodale Mobilität gestalten",
+    "Ladeinfrastruktur und Smart Charging konzipieren",
+    "Autonome Fahrsysteme und ihre regulatorischen Rahmenbedingungen einordnen"
+  ],
+  "PGT_nachhaltige_Wertschoepfung": [
+    "Methoden des Lean Management und kontinuierlicher Verbesserung anwenden",
+    "Digitale Transformation in Produktion und Logistik gestalten",
+    "Nachhaltige Lieferketten analysieren und entwickeln",
+    "Ingenieurwissenschaftliche Grundlagen auf Praxisfälle anwenden",
+    "Innovationsprozesse systematisch steuern"
+  ],
+  "QST_Nachhaltigkeit": [
+    "Nachhaltigkeitsstrategien entwickeln und implementieren",
+    "ESG-Kriterien und Berichtspflichten anwenden",
+    "Ökobilanzen und Lebenszyklusanalysen durchführen",
+    "Klimaschutzziele in betriebliche Prozesse integrieren"
+  ],
+  "QST_Diversity": [
+    "Diversity-Management-Konzepte kennen und umsetzen",
+    "Antidiskriminierungsrecht und Gleichstellungsmaßnahmen anwenden",
+    "Inklusive Kommunikation und partizipative Prozesse gestalten"
+  ],
+  "QST_Internationalisation": [
+    "Interkulturelle Kompetenz in internationalen Teams einsetzen",
+    "Fremdsprachliche Fachkommunikation anwenden",
+    "Internationale Märkte und regulatorische Unterschiede einschätzen"
+  ],
+  "default": [
+    "Fachwissen systematisch aufbauen und in der Praxis anwenden",
+    "Problemlösungskompetenzen in realen Projekten entwickeln",
+    "Aktuelle Entwicklungen im Fachgebiet kritisch einordnen",
+    "Kommunikations- und Teamkompetenzen in beruflichen Kontexten stärken"
+  ]
+}

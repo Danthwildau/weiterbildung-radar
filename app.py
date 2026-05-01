@@ -1251,6 +1251,22 @@ Kalkulation realistisch ist.
         st.write("---")
         phase_3(offers, params, matched)
         feedback_section()
+
+        # ── Zur Angebotsbeschreibung ──────────────────────────────
+        st.write("---")
+        st.subheader("Nächster Schritt")
+        st.markdown(
+            "Haben Sie genug Informationen gesammelt? Dann können Sie jetzt "
+            "direkt zur **offiziellen Angebotsbeschreibung** wechseln — "
+            "alle Angaben aus dem Radar werden automatisch übertragen."
+        )
+        if st.button(
+            "Zur Angebotsbeschreibung (Teil 1) →",
+            type="primary",
+            use_container_width=False,
+        ):
+            st.session_state.radar_params = params
+            st.switch_page("pages/1_Angebotsbeschreibung.py")
     else:
         st.info("Geben Sie einen Kurstitel und eine Beschreibung ein, um zu starten.")
 
