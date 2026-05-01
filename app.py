@@ -201,6 +201,62 @@ DELIVERY_COLORS = {
 
 DATA = Path(__file__).parent / "data"
 
+# ─── HUGGINGFACE SEMANTIC SEARCH (optional) ──────────────────────────────────
+import os as _os
+HF_TOKEN = _os.getenv("HF_TOKEN", "")
+HF_MODEL  = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+HF_API    = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{HF_MODEL}"
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def embed_texts(texts: tuple) -> list:
+    """Get embeddings from HuggingFace Inference API. Cached per unique input."""
+    if not HF_TOKEN:
+        return []
+    try:
+        import requests as _req
+        resp = _req.post(
+            HF_API,
+            headers={"Authorization": f"Bearer {HF_TOKEN}"},
+            json={"inputs": list(texts), "options": {"wait_for_model": True}},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        return []
+    except Exception:
+        return []
+
+def cosine_sim(a, b):
+    import math
+    dot   = sum(x*y for x,y in zip(a,b))
+    na    = math.sqrt(sum(x*x for x in a))
+    nb    = math.sqrt(sum(x*x for x in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def get_offer_embeddings(ids_and_texts: tuple) -> dict:
+    """
+    Embed all offer title+description strings. Returns {id: vector}.
+    Called once per unique set of offers; cached for 30 min.
+    """
+    if not HF_TOKEN: return {}
+    ids, texts = zip(*ids_and_texts) if ids_and_texts else ([], [])
+    # HF API accepts batches of up to 64
+    batch_size = 64
+    all_vecs = []
+    for i in range(0, len(texts), batch_size):
+        vecs = embed_texts(tuple(texts[i:i+batch_size]))
+        if not vecs: return {}  # API error — fall back
+        # Each embedding may be a list of lists (one vector per token); take [CLS] or mean
+        for v in vecs:
+            if isinstance(v[0], list):  # token-level — mean pool
+                vec = [sum(col)/len(col) for col in zip(*v)]
+            else:
+                vec = v
+            all_vecs.append(vec)
+    return dict(zip(ids, all_vecs))
+
+
 REGIONS_DISPLAY = {
     "TH Wildau Region": ["Dahme-Spreewald","Oder-Spree","Teltow-Fläming"],
     "Berlin":           ["Berlin"],
@@ -382,26 +438,15 @@ def load_offers():
     for c in CAT_COLS:
         if c in df.columns: df[c] = df[c].fillna(False).astype(bool)
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
-
-    # Classify delivery mode
-    df["delivery_mode"] = df.apply(
-        lambda r: get_delivery_mode(r.get("format",""), r.get("spatial_flex",0)), axis=1)
-
-    # Geocode HW courses (provider city → lat/lon)
-    def get_coords(row):
-        if row.get("source") != "hochundweit": return None, None
-        uni  = str(row.get("provider",""))
-        city = get_uni_city(uni)
-        if not city: return None, None
-        coords = CITY_COORDS.get(city)
-        return (coords[0], coords[1]) if coords else (None, None)
-
-    coords = df.apply(get_coords, axis=1)
-    df["lat"] = [c[0] for c in coords]
-    df["lon"] = [c[1] for c in coords]
-    df["city_name"] = df.apply(
-        lambda r: get_uni_city(str(r.get("provider",""))) if r.get("source")=="hochundweit" else r.get("city",""),
-        axis=1)
+    # delivery_mode, lat, lon, city_name are pre-computed in offers.csv
+    if "delivery_mode" not in df.columns:
+        df["delivery_mode"] = "hybrid_location"
+    if "lat" not in df.columns:
+        df["lat"] = None
+    if "lon" not in df.columns:
+        df["lon"] = None
+    if "city_name" not in df.columns:
+        df["city_name"] = df["city"]
     return df
 
 @st.cache_data
@@ -426,75 +471,97 @@ def load_kgs():
 
 def match_offers(offers, user_text, selected_cats, kg, n_per_source=30, params=None):
     """
-    Score courses by relevance. Improvements over naive keyword count:
-    - Title match weighted 5× (HW has short precise titles; this fixes MN dominance)
-    - Description match log-normalised by length (prevents long MN SEO titles winning)
-    - HW courses get +1.5 source bonus (academic courses are primary competition)
-    - Delivery mode match boosts score (Präsenz matches Präsenz/Hybrid)
-    - Degree and ECTS proximity boost when provided by user
-    Returns up to n_per_source from each source, interleaved by score.
+    Two-stage relevance scoring:
+    1. Keyword score (always) — title-weighted, length-normalised
+    2. Semantic score (if HF_TOKEN set) — cosine similarity via multilingual embeddings
+
+    HW source +1.5, local geo +3.0/+1.5, delivery mode match +2.0
+    Returns top 60 by combined score.
     """
-    user_words = tokenize(user_text)
-    user_stems = {w[:5] for w in user_words if len(w) >= 4}
-    # Delivery mode preference from user's format choice
+    if not user_text.strip():
+        return offers.head(0)
+
+    user_words   = tokenize(user_text)
+    user_stems   = {w[:5] for w in user_words if len(w) >= 4}
     user_delivery = get_delivery_mode(params.get("format","") if params else "")
     user_degree   = str(params.get("degree","")).lower() if params else ""
-    user_ects     = int(params.get("ects",0)) if params else 0
 
-    scores = []
-    for _, row in offers.iterrows():
+    # ── Keyword scoring ───────────────────────────────────────────────
+    kw_scores = []
+    for r in offers.itertuples(index=False):
         s = 0.0
-        title = str(row.get("title","")).lower()
-        desc  = str(row.get("description","")).lower()
+        title = str(r.title or "").lower()
+        desc  = str(r.description or "").lower()
         tw = tokenize(title); dw = tokenize(desc)
         ts = {w[:5] for w in tw if len(w)>=4}
         ds = {w[:5] for w in dw if len(w)>=4}
-        desc_len = max(len(dw), 1)
+        dlen = max(len(dw), 1)
 
-        # Title: high weight (5×)
         t_exact = user_words & tw
         t_stem  = (user_stems & ts) - user_words
         s += len(t_exact) * 5.0
         s += len(t_stem)  * 2.0
 
-        # Description: log-normalised
+        import math as _math
         d_exact = user_words & dw
         d_stem  = (user_stems & ds) - user_words - t_exact
         if d_exact:
-            s += math.log(1 + len(d_exact)) / math.log(1 + desc_len) * 8
+            s += _math.log(1 + len(d_exact)) / _math.log(1 + dlen) * 8
         if d_stem:
-            s += math.log(1 + len(d_stem))  / math.log(1 + desc_len) * 3
+            s += _math.log(1 + len(d_stem))  / _math.log(1 + dlen) * 3
 
-        # Category match
         for cat in selected_cats:
-            if row.get(cat, False): s += 2.0
-        if kg and str(row.get("knowledgeGroup","")) == kg: s += 1.5
+            if getattr(r, cat, False): s += 2.0
+        if kg and str(r.knowledgeGroup or "") == kg: s += 1.5
 
-        # HW source bonus (academic courses = primary competition reference)
-        if row.get("source") == "hochundweit":
-            s += 1.5
+        # Source / geo / format / degree boosts
+        if r.source == "hochundweit": s += 1.5
+        geo = str(r.geo_tier or "")
+        if geo == "wildau":      s += 3.0
+        elif geo == "berlin_bb": s += 1.5
+        row_mode = str(getattr(r, "delivery_mode", "") or "")
+        if row_mode == user_delivery: s += 2.0
+        elif user_delivery in ("hybrid_location","in_person") and row_mode in ("hybrid_location","in_person"): s += 1.0
+        row_deg = str(r.degree or "").lower()
+        if user_degree and row_deg and user_degree[:4] in row_deg[:4]: s += 1.5
 
-        # Delivery mode match (same mode = more relevant competition)
-        row_mode = str(row.get("delivery_mode",""))
-        if row_mode == user_delivery:
-            s += 2.0
-        elif (user_delivery in ("hybrid_location","in_person") and
-              row_mode in ("hybrid_location","in_person")):
-            s += 1.0  # partial match
+        kw_scores.append(s)
 
-        # Degree match
-        row_degree = str(row.get("degree","")).lower()
-        if user_degree and row_degree and user_degree[:4] in row_degree[:4]:
-            s += 1.5
+    o2 = offers.copy()
+    o2["_kw"] = kw_scores
+    o2 = o2[o2["_kw"] >= 2.0].sort_values("_kw", ascending=False)
 
-        scores.append(s)
+    # ── Semantic scoring (HuggingFace) ────────────────────────────────
+    if HF_TOKEN and len(o2) > 0:
+        # Embed user query
+        user_vecs = embed_texts((user_text,))
+        if user_vecs:
+            user_vec = user_vecs[0]
+            if isinstance(user_vec[0], list):  # mean pool if token-level
+                user_vec = [sum(col)/len(col) for col in zip(*user_vec)]
 
-    o2 = offers.copy(); o2["_score"] = scores
-    # Minimum threshold: must have text relevance (not just format/source boost)
-    o2 = o2[o2["_score"] >= 2.0].sort_values("_score", ascending=False)
-    hw = o2[o2["source"] == "hochundweit"].head(n_per_source)
-    mn = o2[o2["source"] == "meinnow"].head(n_per_source)
-    return pd.concat([hw, mn]).sort_values("_score", ascending=False).reset_index(drop=True)
+            # Embed offer titles (top 120 by keyword to limit API calls)
+            top_pool = o2.head(120)
+            ids_texts = tuple(
+                (str(r.id), (str(r.title or "") + " " + str(r.description or ""))[:300])
+                for r in top_pool.itertuples(index=False)
+            )
+            offer_vecs = get_offer_embeddings(ids_texts)
+
+            if offer_vecs:
+                sem_scores = []
+                for r in top_pool.itertuples(index=False):
+                    vec = offer_vecs.get(str(r.id))
+                    sem_scores.append(cosine_sim(user_vec, vec) * 5.0 if vec else 0.0)
+
+                top_pool = top_pool.copy()
+                top_pool["_sem"] = sem_scores
+                top_pool["_score"] = top_pool["_kw"] + top_pool["_sem"]
+                return top_pool.sort_values("_score", ascending=False).head(60).reset_index(drop=True)
+
+    o2["_score"] = o2["_kw"]
+    return o2.head(60).reset_index(drop=True)
+
 
 def score_badge(score, label):
     # 10 = green (good), 1 = red (bad)
@@ -594,7 +661,7 @@ def phase_0(kgs):
 
     st.write("")
     # ── Kosteninputs ─────────────────────────────────────────────────
-    section_header("#ede0f5", "2. Kosteninputs für Preiskalkulation")
+    section_header("#ede0f5", "2. Kosteninputs für Preisgestaltung")
     with st.container():
         cc1, cc2, cc3, cc4, cc5 = st.columns(5)
         dev_h     = cc1.number_input("Entwicklungsstunden",value=40,step=5)
@@ -659,7 +726,7 @@ def show_offer_map(matched_df):
         st.caption("Karte nicht verfügbar — pip install pydeck für interaktive Karte.")
 
 def phase_1(offers, params):
-    section_header("#d4edda", "3. Angebot — wie viel gibt es bereits?")
+    section_header("#dceefb", "3. Was gibt es bereits?")
     if not params["user_text"].strip():
         st.info("Bitte Kurstitel und Beschreibung eingeben."); return None
 
@@ -701,11 +768,6 @@ def phase_1(offers, params):
 
     with st.expander("Karte der Hochschulangebote anzeigen"):
         show_offer_map(matched)
-
-    subtab_wett, subtab_preis = st.tabs([
-        f"Wettbewerbs-Angebote ({n_comp} Präsenz/Hybrid)",
-        f"Preisreferenz ({n_total} inkl. Online)",
-    ])
 
     def show_offers(df_src, tab_key, show_price_stats=True):
         if df_src.empty:
@@ -829,38 +891,12 @@ def phase_1(offers, params):
         elif len(hw_act) < 3:
             st.caption("Zu wenige Preisangaben für Statistik.")
 
-    with subtab_wett:
-        tab_local, tab_regional, tab_national = st.tabs([
-            "Lokal — TH Wildau",
-            "Regional — Berlin/BB",
-            "National",
-        ])
-        def geo_filter(df, tiers):
-            geo   = df[df["geo_tier"].isin(tiers)]
-            return geo.drop_duplicates(subset=["id"]).reset_index(drop=True)
-
-        with tab_local:
-            show_offers(geo_filter(matched_competition, ["wildau"]), "wett_local")
-        with tab_regional:
-            show_offers(geo_filter(matched_competition, ["wildau","berlin_bb"]), "wett_regional")
-        with tab_national:
-            show_offers(matched_competition, "wett_national")
-
-    with subtab_preis:
-        st.caption("Alle Formate (inkl. Online) — für Preisvergleich und Marktsättigung.")
-        tab_local2, tab_regional2, tab_national2 = st.tabs([
-            "Lokal — TH Wildau",
-            "Regional — Berlin/BB",
-            "National",
-        ])
-        with tab_local2:
-            show_offers(geo_filter(matched_price, ["wildau"]), "preis_local")
-        with tab_regional2:
-            show_offers(geo_filter(matched_price, ["wildau","berlin_bb"]), "preis_regional")
-        with tab_national2:
-            show_offers(matched_price, "preis_national")
-
-    return matched_price
+    st.caption(
+        "Angebote nach Relevanz sortiert. Hochschulangebote und lokale Angebote "
+        "werden höher gewichtet. Häkchen entfernen, um ein Angebot aus der Statistik auszuschließen."
+    )
+    show_offers(matched, "all", show_price_stats=True)
+    return matched
 
 
 def phase_2(berufe_df, demand, params):
@@ -1025,7 +1061,7 @@ def phase_2(berufe_df, demand, params):
 
 
 def phase_3(offers, params, matched):
-    section_header("#e8eaf6", "5. Preisgestaltung")
+    section_header("#ede0f5", "5. Preisgestaltung")
     priced_all = matched[
     (matched["source"] == "hochundweit") &
     matched["price"].notna() &
@@ -1044,48 +1080,70 @@ def phase_3(offers, params, matched):
         b3.metric("Bei Zielauslastung",
                   f"{params['target_tn']} TN")
 
-        # Deckungsbeitrag chart
-        tn_max = max(params["target_tn"]*3, 40)
-        tn_range = list(range(1, tn_max+1))
-        price_points = [500, 1000, 2000, 5000, round(be_preis/100)*100]
-        price_points = sorted(set(p for p in price_points if p > 0))
+        # Deckungsbeitrag chart — centred on target_tn
+        target  = params["target_tn"]
+        tn_min  = max(1, int(target * 0.2))
+        tn_max  = max(int(target * 2.8), target + 15)
+        tn_range = list(range(tn_min, tn_max + 1))
+
+        # Price lines bracketing the break-even price
+        be_r = round(be_preis / 100) * 100
+        price_candidates = sorted(set(filter(lambda p: p > 0, [
+            round(be_preis * 0.5  / 100) * 100,
+            round(be_preis * 0.75 / 100) * 100,
+            be_r,
+            round(be_preis * 1.25 / 100) * 100,
+            round(be_preis * 1.6  / 100) * 100,
+        ])))
 
         fig_be = go.Figure()
-        colors_line = ["#185fa5","#27ae60","#f39c12","#9b1c1c","#7f77dd"]
-        for i, preis in enumerate(price_points):
+        palette = ["#c0392b","#e67e22","#185fa5","#27ae60","#7f77dd"]
+        for i, preis in enumerate(price_candidates):
             revenue = [t * (preis/(1+params["overhead"]) - params["sachkosten"]) - fix_net
                        for t in tn_range]
-            label = f"{preis:,.0f} EUR/TN"
-            if abs(preis - be_preis) < 50: label += " (Break-even)"
+            is_be = (preis == be_r)
             fig_be.add_trace(go.Scatter(
-                x=tn_range, y=revenue, mode="lines", name=label,
-                line=dict(width=2.5, color=colors_line[i % len(colors_line)],
-                          dash="dash" if abs(preis-be_preis)<50 else "solid")))
+                x=tn_range, y=revenue, mode="lines",
+                name=f"{preis:,.0f} EUR/TN" + (" ← Break-even" if is_be else ""),
+                line=dict(width=3 if is_be else 1.8,
+                          color=palette[i % len(palette)],
+                          dash="solid" if is_be else "dot")))
 
-        fig_be.add_hline(y=0, line_color="#333", line_width=1)
-        fig_be.add_hline(y=0, line_dash="dot", line_color="#c0392b", line_width=1.5,
-                         annotation_text="Kostendeckung", annotation_position="right")
-        fig_be.add_vline(x=params["target_tn"], line_dash="dash",
-                         line_color="#888", line_width=1,
-                         annotation_text=f"Ziel: {params['target_tn']} TN")
+        fig_be.add_hline(y=0, line_color="#333", line_width=1.5)
+        fig_be.add_vline(x=target, line_dash="dash", line_color="#555", line_width=1.5,
+                         annotation_text=f"{target} TN (Ziel)",
+                         annotation_position="top right")
         fig_be.update_layout(
-            title="Deckungsbeitrag je Preispunkt und Teilnehmerzahl",
+            title="Deckungsbeitrag — zentriert auf Ziel-Teilnehmerzahl",
             xaxis_title="Teilnehmerzahl", yaxis_title="Ergebnis (EUR)",
-            height=400, margin=dict(t=50,b=80),
-            legend=dict(orientation="h", y=-0.25))
-        st.plotly_chart(fig_be, use_container_width=True)
-        st.caption("Oberhalb der Nulllinie ist der Kurs profitabel. "
-                   "Die gestrichelte Linie zeigt Ihren Break-even-Preis.")
+            xaxis=dict(range=[tn_min, tn_max]),
+            height=380, margin=dict(t=50, b=90),
+            legend=dict(orientation="h", y=-0.32))
 
-        st.write("")
-        be_table = []
-        for p in [500,1000,2000,3000,5000,8000,10000,15000]:
+        # Break-even table
+        be_rows = []
+        for p in sorted(set(price_candidates + [round(be_preis*2/100)*100])):
             d = p/(1+params["overhead"]) - params["sachkosten"]
             if d > 0:
-                be_table.append({"Preis pro TN (EUR)": f"{p:,}",
-                                 "Benötigte TN für Break-even": math.ceil(fix_net/d)})
-        if be_table:
-            st.dataframe(pd.DataFrame(be_table), use_container_width=True, hide_index=True)
+                tn_needed = math.ceil(fix_net/d)
+                be_rows.append({
+                    "Preis/TN": f"{p:,} EUR",
+                    "TN für Break-even": tn_needed,
+                    "": "← Ihr Ziel" if tn_needed == target else (
+                        "✓ rentabel" if tn_needed < target else "")
+                })
+
+        col_chart, col_tbl = st.columns([3, 1])
+        with col_chart:
+            st.plotly_chart(fig_be, use_container_width=True)
+            st.caption("Durchgezogene Linie = Break-even-Preis. "
+                       "Oberhalb der Nulllinie ist der Kurs profitabel.")
+        with col_tbl:
+            st.markdown("**Break-even**")
+            if be_rows:
+                st.dataframe(pd.DataFrame(be_rows), hide_index=True,
+                             use_container_width=True,
+                             height=min(36*len(be_rows)+38, 380))
 
         st.write("---")
 
@@ -1095,10 +1153,16 @@ def phase_3(offers, params, matched):
         med = priced_all["price"].median()
         p75 = priced_all["price"].quantile(.75)
 
+        # Clip y-axis to avoid outlier distortion: show ±2.5×IQR around median
+        iqr = p75 - p25
+        y_lo = max(0, p25 - iqr * 1.5)
+        y_hi = min(priced_all["price"].max(), p75 + iqr * 2.5)
+
         fig_mkt = px.box(priced_all, y="price", points="outliers",
             title="Preisverteilung ähnlicher Kurse",
             labels={"price":"Preis (EUR)"},
             color_discrete_sequence=["#185fa5"], height=300)
+        fig_mkt.update_yaxes(range=[y_lo, y_hi])
         if has_cost:
             fig_mkt.add_hline(y=be_preis, line_dash="dash", line_color="#c0392b",
                               annotation_text="Ihr Break-even",
