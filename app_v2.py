@@ -469,8 +469,15 @@ def mode_idee(offers, demand, berufe, comp_demand, comp_map, kgs):
         "Datenschutz & DSGVO",   "Elektromobilität",  "Logistik & Supply Chain",
         "Führung & Leadership",  "Digitale Transformation",
     ]
+
+    # If an example chip was clicked last run, pre-fill via _pending key
+    # (can't write to a widget key while the widget is rendered)
+    pending = st.session_state.pop("_idee_pending", None)
+    default_val = pending if pending is not None else st.session_state.get("idee_query", "")
+
     query = st.text_input(
         "",
+        value=default_val,
         placeholder="Thema eingeben — z.B. KI, Datenschutz, Elektromobilität …",
         label_visibility="collapsed",
         key="idee_query",
@@ -482,7 +489,7 @@ def mode_idee(offers, demand, berufe, comp_demand, comp_map, kgs):
         for i, topic in enumerate(EXAMPLE_TOPICS):
             with chip_cols[i % 4]:
                 if st.button(topic, key=f"ex_{i}", use_container_width=True):
-                    st.session_state["idee_query"] = topic
+                    st.session_state["_idee_pending"] = topic
                     st.rerun()
         return
 
