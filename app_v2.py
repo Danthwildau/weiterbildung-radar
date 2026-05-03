@@ -278,37 +278,59 @@ def tokenize(text):
     return {w for w in re.findall(r'\b\w+\b', text.lower())
             if len(w) >= 4 or w in SHORT_TECH}
 
-def match_berufe(berufe_df, user_text, n=15):
-    user_words = tokenize(user_text)
-    user_stems = {w[:5] for w in user_words if len(w) >= 4}
-    scores = defaultdict(float)
-    for _, row in berufe_df.iterrows():
-        bwords = tokenize(row["beruf_name"].lower())
-        bstems = {w[:5] for w in bwords if len(w) >= 4}
-        s  = len(user_words & bwords) * 4.0
-        s += len((user_stems & bstems) - user_words) * 1.5
-        if s >= 2.0: scores[row["beruf_name"]] = s
-    ranked = sorted(scores.items(), key=lambda x: -x[1])[:n]
-    return [{"beruf_name":b,
-             "kldb_id": int(berufe_df[berufe_df["beruf_name"]==b]["kldb_id"].iloc[0]),
-             "score":s} for b,s in ranked]
+@st.cache_resource(show_spinner=False)
+def build_topic_index(comp_demand_path: str, comp_map_path: str):
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    comp_d = pd.read_csv(comp_demand_path)
+    comp_m = pd.read_csv(comp_map_path)
+    all_comps = comp_d["competency_name"].dropna().unique().tolist()
+    all_profs = comp_m["profession_name"].dropna().unique().tolist()
+    texts     = all_comps + all_profs
+    n_comps   = len(all_comps)
+    vec_w = TfidfVectorizer(min_df=1, ngram_range=(1,2), sublinear_tf=True)
+    mat_w = vec_w.fit_transform(texts)
+    vec_c = TfidfVectorizer(min_df=1, analyzer="char_wb", ngram_range=(4,6), sublinear_tf=True)
+    mat_c = vec_c.fit_transform(texts)
+    return vec_w, mat_w, vec_c, mat_c, all_comps, all_profs, n_comps
 
-def expand_berufe(berufe_df, selected_names, exclude_names, n=15):
-    sel_rows = berufe_df[berufe_df["beruf_name"].isin(selected_names)]
-    sel_pfx  = set(sel_rows["kldb_prefix2"].tolist())
-    sel_stems = {w[:5] for name in selected_names for w in tokenize(name) if len(w)>=4}
-    scores = defaultdict(float)
-    for _, row in berufe_df.iterrows():
-        if row["beruf_name"] in exclude_names: continue
-        bstems = {w[:5] for w in tokenize(row["beruf_name"].lower()) if len(w)>=4}
-        s = 0.0
-        if row["kldb_prefix2"] in sel_pfx: s += 2.5
-        s += len(sel_stems & bstems) * 1.5
-        if s >= 2.0: scores[row["beruf_name"]] = s
-    ranked = sorted(scores.items(), key=lambda x: -x[1])[:n]
-    return [{"beruf_name":b,
-             "kldb_id": int(berufe_df[berufe_df["beruf_name"]==b]["kldb_id"].iloc[0]),
-             "score":s} for b,s in ranked]
+def topic_search(query, comp_demand, comp_map, berufe_df,
+                 top_n_comps=12, top_n_profs=12):
+    from sklearn.metrics.pairwise import cosine_similarity
+    import numpy as _np
+    if not query.strip(): return [], []
+    vec_w, mat_w, vec_c, mat_c, all_comps, all_profs, n_comps = build_topic_index(
+        str(DATA/"competency_demand.csv"), str(DATA/"profession_competency_map.csv"))
+    q_w  = vec_w.transform([query])
+    q_c  = vec_c.transform([query])
+    sims = cosine_similarity(q_w, mat_w)[0]*0.6 + cosine_similarity(q_c, mat_c)[0]*0.4
+    top_idx = _np.argsort(sims)[::-1][:top_n_comps*6]
+    matched_comps, matched_prof_names = [], []
+    for i in top_idx:
+        if sims[i] < 0.04: break
+        if i < n_comps:
+            if len(matched_comps) < top_n_comps: matched_comps.append(all_comps[i])
+        else:
+            if len(matched_prof_names) < top_n_profs: matched_prof_names.append(all_profs[i-n_comps])
+    # KldB IDs via comp_map
+    prof_rows = []
+    seen_names = set()
+    for name in matched_prof_names:
+        if name in seen_names: continue
+        rows = comp_map[comp_map["profession_name"]==name][["profession_name","kldb_id"]].drop_duplicates()
+        if not rows.empty:
+            prof_rows.append({"beruf_name": name, "kldb_id": int(rows.iloc[0]["kldb_id"])})
+            seen_names.add(name)
+    # Also via competency→profession mapping
+    if matched_comps:
+        comp_profs = comp_map[comp_map["competency_name"].isin(matched_comps)]
+        by_comp = (comp_profs.groupby(["profession_name","kldb_id"], as_index=False)
+                   .agg(n=("competency_name","nunique"))
+                   .sort_values("n", ascending=False).head(top_n_profs))
+        for _, r in by_comp.iterrows():
+            if r["profession_name"] not in seen_names:
+                prof_rows.append({"beruf_name": r["profession_name"], "kldb_id": int(r["kldb_id"])})
+                seen_names.add(r["profession_name"])
+    return matched_comps[:top_n_comps], prof_rows[:top_n_profs]
 
 def get_comp_for_professions(kldb_ids, comp_map, comp_demand, top_n=15):
     """Top competencies for a set of KldB IDs, demand-weighted."""
@@ -442,31 +464,51 @@ def mode_idee(offers, demand, berufe, comp_demand, comp_map, kgs):
     """Directed flow: topic search → demand → market → design."""
 
     # ── Step 1: Search ────────────────────────────────────────────────
+    EXAMPLE_TOPICS = [
+        "KI & Machine Learning", "Projektmanagement", "Nachhaltigkeit & ESG",
+        "Datenschutz & DSGVO",   "Elektromobilität",  "Logistik & Supply Chain",
+        "Führung & Leadership",  "Digitale Transformation",
+    ]
     query = st.text_input(
         "",
-        placeholder="z.B. KI in der Automobilindustrie, Datenschutz für Verwaltungen …",
+        placeholder="Thema eingeben — z.B. KI, Datenschutz, Elektromobilität …",
         label_visibility="collapsed",
         key="idee_query",
     )
     if not query.strip():
-        st.markdown(
-            '<p style="color:#888;font-size:14px;margin-top:4px">'
-            'Geben Sie ein Thema, eine Berufsgruppe oder eine Kursbeschreibung ein.</p>',
-            unsafe_allow_html=True)
+        st.markdown("<p style='color:#888;font-size:13px;margin:6px 0 4px 0'>Oder Beispiel auswählen:</p>",
+                    unsafe_allow_html=True)
+        chip_cols = st.columns(4)
+        for i, topic in enumerate(EXAMPLE_TOPICS):
+            with chip_cols[i % 4]:
+                if st.button(topic, key=f"ex_{i}", use_container_width=True):
+                    st.session_state["idee_query"] = topic
+                    st.rerun()
         return
 
     # ── Step 2: Demand snapshot ───────────────────────────────────────
     with st.spinner("Analysiere Nachfrage …"):
-        berufe_matches = match_berufe(berufe, query, n=20)
+        matched_comps, prof_rows = topic_search(query, comp_demand, comp_map, berufe)
 
-    if not berufe_matches:
-        st.info("Keine passenden Berufsgruppen gefunden. Versuchen Sie einen anderen Begriff.")
+    if not prof_rows and not matched_comps:
+        st.info("Keine Treffer. Versuchen Sie: Digitalisierung, KI, Projektmanagement …")
         return
 
-    kldb_ids = [b["kldb_id"] for b in berufe_matches[:10]]
+    berufe_matches = prof_rows
+    kldb_ids = [b["kldb_id"] for b in prof_rows[:12]]
 
-    # Top competencies
-    comps = get_comp_for_professions(kldb_ids, comp_map, comp_demand, top_n=12)
+    # Competencies from topic_search or profession lookup
+    comps_df = pd.DataFrame()
+    if matched_comps and not comp_demand.empty:
+        sub = comp_demand[comp_demand["competency_name"].isin(matched_comps)]
+        local = sub[sub["region"].isin(["Dahme-Spreewald","Oder-Spree","Teltow-Fläming","Berlin"])]
+        if not local.empty:
+            comps_df = (local.groupby("competency_name", as_index=False)
+                        .agg(avg_growth=("avg_growth","mean"), demand_score=("demand_score","mean"))
+                        .sort_values("demand_score", ascending=False).head(12))
+    if comps_df.empty:
+        comps_df = get_comp_for_professions(kldb_ids, comp_map, comp_demand, top_n=12)
+    comps = comps_df
 
     # Demand chart
     fig = demand_chart(demand, kldb_ids)
@@ -496,8 +538,8 @@ def mode_idee(offers, demand, berufe, comp_demand, comp_map, kgs):
 
     with col_comps:
         st.markdown("#### Gefragte Kompetenzen")
-        if not comps.empty:
-            comp_chips(comps, "idee")
+        if not comps_df.empty:
+            comp_chips(comps_df, "idee")
             st.caption("🟢 wachsend  🟡 stabil  🔴 rückläufig (TH Wildau Region + Berlin)")
         else:
             st.caption("Keine Kompetenz-Daten verfügbar.")
@@ -657,22 +699,10 @@ def mode_inspiration(offers, demand, berufe, comp_demand, comp_map, comp_summary
         bg = "#f0f6ff" if is_sel else "#fff"
         border = "#185fa5" if is_sel else "#e8e8e8"
 
-        st.markdown(f"""
-<div style="border:1.5px solid {border};border-radius:8px;padding:10px 14px;
-            margin:4px 0;background:{bg};cursor:pointer">
-  <div style="display:flex;justify-content:space-between;align-items:center">
-    <span style="font-size:14px;font-weight:{'600' if is_sel else '400'}">
-      {row['competency_name'][:55]}
-    </span>
-    <span style="font-size:13px;font-weight:600;color:{gr_color}">{gr_str}</span>
-  </div>
-  <div class="demand-bar-wrap">
-    <div class="demand-bar {bar_color}" style="width:{bar_w}%"></div>
-  </div>
-</div>""", unsafe_allow_html=True)
-
-        if st.button("Auswählen", key=f"insp_sel_{i}", use_container_width=False,
-                     help=row["competency_name"]):
+        if st.button(
+                f"{row['competency_name'][:50]}  ·  {gr_str}",
+                key=f"insp_sel_{i}", use_container_width=True,
+                type="primary" if is_sel else "secondary"):
             st.session_state.insp_selected = row["competency_name"]
             st.rerun()
 
@@ -725,7 +755,7 @@ def mode_inspiration(offers, demand, berufe, comp_demand, comp_map, comp_summary
 
         # CTA: develop this into a course
         st.markdown("")
-        if st.button(f"Kurs zu '{sel[:30]}' entwickeln →", type="primary"):
+        if st.button(f"💡 Kurs zu »{sel[:35]}« entwickeln", type="primary", use_container_width=True):
             st.session_state.idee_query = sel
             st.session_state.mode = "idee"
             st.rerun()
@@ -756,32 +786,16 @@ def main():
     col1, col2, col3 = st.columns([5, 5, 2])
 
     with col1:
-        active1 = st.session_state.mode == "idee"
-        border1 = "#185fa5" if active1 else "#e0e0e0"
-        bg1     = "#f0f6ff" if active1 else "#fff"
-        st.markdown(f"""
-<div style="border:2px solid {border1};border-radius:12px;padding:20px 20px;
-            background:{bg1};text-align:center">
-  <div style="font-size:1.5rem">💡</div>
-  <div style="font-weight:600;margin:6px 0">Ich habe eine Idee</div>
-  <div style="font-size:13px;color:#666">Ich weiß ungefähr, was ich anbieten möchte</div>
-</div>""", unsafe_allow_html=True)
-        if st.button("Idee entwickeln", use_container_width=True, key="btn_idee"):
+        if st.button("💡  Ich habe eine Idee\n\nIch weiß ungefähr, was ich anbieten möchte",
+                     use_container_width=True, key="btn_idee",
+                     type="primary" if st.session_state.mode=="idee" else "secondary"):
             st.session_state.mode = "idee"
             st.rerun()
 
     with col2:
-        active2 = st.session_state.mode == "inspiration"
-        border2 = "#185fa5" if active2 else "#e0e0e0"
-        bg2     = "#f0f6ff" if active2 else "#fff"
-        st.markdown(f"""
-<div style="border:2px solid {border2};border-radius:12px;padding:20px 20px;
-            background:{bg2};text-align:center">
-  <div style="font-size:1.5rem">🔍</div>
-  <div style="font-weight:600;margin:6px 0">Ich suche Inspiration</div>
-  <div style="font-size:13px;color:#666">Zeig mir, was der Markt gerade braucht</div>
-</div>""", unsafe_allow_html=True)
-        if st.button("Markt erkunden", use_container_width=True, key="btn_insp"):
+        if st.button("🔍  Ich suche Inspiration\n\nZeig mir, was der Markt gerade braucht",
+                     use_container_width=True, key="btn_insp",
+                     type="primary" if st.session_state.mode=="inspiration" else "secondary"):
             st.session_state.mode = "inspiration"
             st.rerun()
 
