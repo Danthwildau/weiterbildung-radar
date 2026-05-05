@@ -76,11 +76,11 @@ if not suggested_lernziele:
 
 # ─── PAGE ────────────────────────────────────────────────────────────
 
-st.title("Teil 1 — Angebotsbeschreibung")
+st.title("Eckdaten zum Angebot")
 st.markdown(
-    "Dieses Formular entspricht dem offiziellen TH-Wildau-Formular zur Konzeption von "
-    "Weiterbildungsangeboten. Felder die automatisch aus dem Weiterbildungs-Radar "
-    "übertragen wurden sind mit **★** markiert. Bitte prüfen und ergänzen Sie alle Angaben."
+    "Grundlegende Angaben zum geplanten Weiterbildungsangebot. "
+    "Mit **★** markierte Felder wurden automatisch aus dem Weiterbildungs-Radar übertragen. "
+    "Bitte prüfen und ergänzen Sie alle Angaben."
 )
 st.markdown("---")
 
@@ -135,7 +135,7 @@ with col2:
     )
     verantwortlich_durchfuehrung = st.text_input(
         "Verantwortlich für die Durchführung",
-        placeholder="Name oder Stelle, falls abweichend",
+        placeholder="z.B. WIT, Fachbereich INW",
     )
     kooperationspartner = st.text_input(
         "Kooperationspartner (falls zutreffend)",
@@ -188,6 +188,16 @@ if suggested_lernziele:
         st.markdown("**Ausgewählte Lernziele:**")
         for lz in sorted(st.session_state.selected_lernziele):
             st.markdown(f"- {lz}")
+
+st.markdown("**Eigene Lernziele hinzufügen** (optional):")
+lernziel_freitext = st.text_area(
+    "Lernziele Freitext",
+    placeholder="z.B. Die Teilnehmenden können IoT-Architekturen selbstständig konzipieren und dokumentieren.",
+    height=80,
+    label_visibility="collapsed",
+    key="lernziel_freitext",
+)
+hint("Jede Zeile wird als eigenes Lernziel behandelt.")
 
 # ═══════════════════════════════════════════════════════════════════
 # BLOCK 3: Niveau, Umfang, Format
@@ -275,8 +285,14 @@ if berufe_list:
         label_visibility="collapsed",
     )
 else:
-    st.info("Keine Berufsgruppen aus dem Radar — bitte manuell eingeben.")
-    zielgruppe_berufe = []
+    st.caption("Keine Berufsgruppen aus dem Radar — bitte manuell eingeben.")
+    zielgruppe_manual = st.text_area(
+        "Zielgruppen-Berufsbilder (manuell)",
+        placeholder="z.B. Ingenieur/in Elektrotechnik\nQualitätsmanager/in\nIT-Systemkaufmann/-frau",
+        height=100,
+        label_visibility="collapsed",
+    )
+    zielgruppe_berufe = [b.strip() for b in zielgruppe_manual.splitlines() if b.strip()]
 
 zielgruppe_freitext = st.text_area(
     "Zielgruppe (Beschreibung / Ergänzung)",
@@ -388,6 +404,7 @@ def collect_form_data():
         "kooperationspartner": kooperationspartner,
         "inhalte": inhalte_text,
         "lernziele_selected": sorted(st.session_state.get("selected_lernziele", set())),
+        "lernziele_freitext": [l.strip() for l in st.session_state.get("lernziel_freitext","").splitlines() if l.strip()],
         "dqr": dqr,
         "ects": ects,
         "workload": f"{ects*25}–{ects*30} Stunden" if ects > 0 else "—",
@@ -474,10 +491,11 @@ def build_docx(data: dict) -> bytes:
     p.add_run("Kurzbeschreibung:").bold = True
     doc.add_paragraph(data["inhalte"] or "—").paragraph_format.space_after = Pt(6)
 
-    if data["lernziele_selected"]:
+    all_lernziele = data.get("lernziele_selected",[]) + data.get("lernziele_freitext",[])
+    if all_lernziele:
         p2 = doc.add_paragraph()
         p2.add_run("Lernziele:").bold = True
-        for lz in data["lernziele_selected"]:
+        for lz in all_lernziele:
             doc.add_paragraph(lz, style="List Bullet")
 
     # ── Block 3: Niveau / Umfang ──
@@ -554,32 +572,13 @@ def build_docx(data: dict) -> bytes:
 # NEXTCLOUD UPLOAD
 # ═══════════════════════════════════════════════════════════════════
 
-def upload_to_nextcloud(docx_bytes: bytes, filename: str,
-                         nc_url: str, nc_user: str, nc_password: str,
-                         nc_path: str) -> tuple[bool, str]:
-    try:
-        import requests
-        url = f"{nc_url.rstrip('/')}/remote.php/dav/files/{nc_user}/{nc_path.strip('/')}/{filename}"
-        resp = requests.put(
-            url,
-            data=docx_bytes,
-            auth=(nc_user, nc_password),
-            headers={"Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
-            timeout=30,
-        )
-        if resp.status_code in (200, 201, 204):
-            return True, url
-        return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
-    except Exception as e:
-        return False, str(e)
-
 # ═══════════════════════════════════════════════════════════════════
 # OUTPUT SECTION
 # ═══════════════════════════════════════════════════════════════════
 st.markdown("---")
 section("#f5f5f5", "Dokument erstellen und speichern")
 
-col_dl, col_nc = st.columns(2)
+col_dl, _ = st.columns([2,1])
 
 with col_dl:
     st.markdown("**Als Word-Dokument herunterladen**")
@@ -596,33 +595,18 @@ with col_dl:
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
 
-with col_nc:
-    st.markdown("**In Nextcloud speichern**")
-    with st.expander("Nextcloud-Verbindung einrichten"):
-        nc_url  = st.text_input("Nextcloud-URL", placeholder="https://cloud.th-wildau.de", key="nc_url")
-        nc_user = st.text_input("Benutzername", key="nc_user")
-        nc_pass = st.text_input("Passwort / App-Passwort", type="password", key="nc_pass")
-        nc_path = st.text_input("Zielordner in Nextcloud",
-                                 value="Weiterbildung/Angebotsbeschreibungen",
-                                 key="nc_path")
-        st.caption("Tipp: Verwenden Sie ein App-Passwort (Nextcloud → Einstellungen → Sicherheit).")
-
-    if st.button("In Nextcloud hochladen"):
-        if not all([nc_url, nc_user, nc_pass]):
-            st.error("Bitte Nextcloud-URL, Benutzername und Passwort eingeben.")
-        else:
-            with st.spinner("Wird hochgeladen..."):
-                data = collect_form_data()
-                docx_bytes = build_docx(data)
-                safe_name = re.sub(r'[^\w\-]', '_', name or "Angebotsbeschreibung")
-                filename = f"Angebotsbeschreibung_{safe_name}_{datetime.date.today()}.docx"
-                ok, msg = upload_to_nextcloud(docx_bytes, filename, nc_url, nc_user, nc_pass, nc_path)
-            if ok:
-                st.success(f"Erfolgreich hochgeladen: {nc_path}/{filename}")
-            else:
-                st.error(f"Fehler beim Upload: {msg}")
-
 # ── Back link ──
 st.markdown("---")
 if st.button("← Zurück zum Weiterbildungs-Radar"):
+    # Preserve any changes back into radar_params so phase 0 is not reset
+    if "radar_params" not in st.session_state:
+        st.session_state.radar_params = {}
+    st.session_state.radar_params.update({
+        "title": name,
+        "degree": abschluss,
+        "format": teilnahme_form,
+        "ects": ects,
+        "months": dauer.replace(" Monate","").strip() if "Monate" in dauer else dauer,
+        "description": inhalte_text,
+    })
     st.switch_page("app.py")

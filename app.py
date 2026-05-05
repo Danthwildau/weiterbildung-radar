@@ -201,61 +201,101 @@ DELIVERY_COLORS = {
 
 DATA = Path(__file__).parent / "data"
 
-# ─── HUGGINGFACE SEMANTIC SEARCH (optional) ──────────────────────────────────
+
+# ─── SEARCH INFRASTRUCTURE ───────────────────────────────────────────────────
 import os as _os
 HF_TOKEN = _os.getenv("HF_TOKEN", "")
-HF_MODEL  = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-HF_API    = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{HF_MODEL}"
+HF_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+HF_API   = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{HF_MODEL}"
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def embed_texts(texts: tuple) -> list:
-    """Get embeddings from HuggingFace Inference API. Cached per unique input."""
-    if not HF_TOKEN:
+STOP_EDUCATIONAL = [
+    "lernen","lernst","lehren","lehre","studieren","studium","kurs","kurse",
+    "modul","module","thema","themen","bereich","bereichen","grundlagen",
+    "einführung","vertiefung","vertiefende","überblick","übersicht",
+    "werden","durch","sowie","auch","können","haben","sein","eine","einen",
+    "einer","über","nach","beim","liegt","wird","sind","mehr","noch","dazu",
+    "weitere","weiteren","dabei","daher","anhand","unter","ohne",
+    "diesem","dieser","dieses","ihrer","ihren","ihrem",
+    "ziel","ziele","inhalte","inhalt","methoden","methode",
+    "praxis","theorie","kompetenz","kompetenzen","kenntnisse","fähigkeiten",
+]
+
+@st.cache_resource(show_spinner=False)
+def build_tfidf_index(path: str):
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    import pandas as _pd
+    df = _pd.read_csv(path)
+    df["_text"] = (df["title"].fillna("") + " " +
+                   df["description"].fillna("").str[:400])
+    ids = df["id"].astype(str).tolist()
+    vec = TfidfVectorizer(
+        max_features=25000, min_df=2, max_df=0.65,
+        sublinear_tf=True, ngram_range=(1, 2),
+        stop_words=STOP_EDUCATIONAL,
+    )
+    mat = vec.fit_transform(df["_text"])
+    return vec, mat, ids
+
+def tfidf_search(user_text, vectorizer, matrix, ids, offers_df, params=None, top_n=60):
+    from sklearn.metrics.pairwise import cosine_similarity as _cos
+    import numpy as _np
+    if not user_text.strip():
+        return offers_df.head(0)
+    q_vec = vectorizer.transform([user_text])
+    sims  = _cos(q_vec, matrix)[0]
+    user_delivery = get_delivery_mode(params.get("format","") if params else "")
+    user_degree   = str(params.get("degree","")).lower() if params else ""
+    selected_cats = params.get("selected_cats",[]) if params else []
+    kg            = params.get("kg","") if params else ""
+    boosts = _np.zeros(len(sims))
+    for i, r in enumerate(offers_df.itertuples(index=False)):
+        b = 0.0
+        if r.source == "hochundweit":  b += 0.04
+        geo = str(getattr(r,"geo_tier","") or "")
+        if geo == "wildau":            b += 0.08
+        elif geo == "berlin_bb":       b += 0.04
+        mode = str(getattr(r,"delivery_mode","") or "")
+        if mode == user_delivery:      b += 0.05
+        elif user_delivery in ("hybrid_location","in_person") and mode in ("hybrid_location","in_person"):
+            b += 0.02
+        deg = str(r.degree or "").lower()
+        if user_degree and deg and user_degree[:4] in deg[:4]: b += 0.03
+        for cat in selected_cats:
+            if getattr(r, cat, False): b += 0.03
+        if kg and str(r.knowledgeGroup or "") == kg: b += 0.04
+        boosts[i] = b
+    final   = sims + boosts
+    top_idx = _np.argsort(final)[::-1][:top_n]
+    result  = offers_df.iloc[top_idx].copy()
+    result["_score"] = final[top_idx]
+    return result[result["_score"] > 0.04].reset_index(drop=True)
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def hf_rerank(query: str, candidate_texts: tuple) -> list:
+    if not HF_TOKEN or not candidate_texts:
         return []
     try:
         import requests as _req
-        resp = _req.post(
-            HF_API,
+        all_texts = [query] + list(candidate_texts)
+        resp = _req.post(HF_API,
             headers={"Authorization": f"Bearer {HF_TOKEN}"},
-            json={"inputs": list(texts), "options": {"wait_for_model": True}},
-            timeout=20,
-        )
-        if resp.status_code == 200:
-            return resp.json()
-        return []
+            json={"inputs": all_texts, "options": {"wait_for_model": True}},
+            timeout=15)
+        if resp.status_code != 200:
+            return []
+        vecs = resp.json()
+        def mp(v): return [sum(c)/len(c) for c in zip(*v)] if isinstance(v[0],list) else v
+        qv = mp(vecs[0])
+        out = []
+        for v in vecs[1:]:
+            cv = mp(v)
+            dot = sum(a*b for a,b in zip(qv,cv))
+            nq  = sum(x*x for x in qv)**0.5
+            nc  = sum(x*x for x in cv)**0.5
+            out.append(dot/(nq*nc) if nq and nc else 0.0)
+        return out
     except Exception:
         return []
-
-def cosine_sim(a, b):
-    import math
-    dot   = sum(x*y for x,y in zip(a,b))
-    na    = math.sqrt(sum(x*x for x in a))
-    nb    = math.sqrt(sum(x*x for x in b))
-    return dot / (na * nb) if na and nb else 0.0
-
-@st.cache_data(show_spinner=False, ttl=1800)
-def get_offer_embeddings(ids_and_texts: tuple) -> dict:
-    """
-    Embed all offer title+description strings. Returns {id: vector}.
-    Called once per unique set of offers; cached for 30 min.
-    """
-    if not HF_TOKEN: return {}
-    ids, texts = zip(*ids_and_texts) if ids_and_texts else ([], [])
-    # HF API accepts batches of up to 64
-    batch_size = 64
-    all_vecs = []
-    for i in range(0, len(texts), batch_size):
-        vecs = embed_texts(tuple(texts[i:i+batch_size]))
-        if not vecs: return {}  # API error — fall back
-        # Each embedding may be a list of lists (one vector per token); take [CLS] or mean
-        for v in vecs:
-            if isinstance(v[0], list):  # token-level — mean pool
-                vec = [sum(col)/len(col) for col in zip(*v)]
-            else:
-                vec = v
-            all_vecs.append(vec)
-    return dict(zip(ids, all_vecs))
-
 
 REGIONS_DISPLAY = {
     "TH Wildau Region": ["Dahme-Spreewald","Oder-Spree","Teltow-Fläming"],
@@ -462,6 +502,30 @@ def load_berufe():
     df["kldb_prefix2"] = df["kldb_id"].astype(str).str[:2]
     return df
 
+
+@st.cache_data
+def load_competency_demand():
+    path = DATA / "competency_demand.csv"
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(path)
+    df["kldb_id"] = df.get("kldb_id", pd.Series(dtype=str))
+    return df
+
+@st.cache_data
+def load_competency_summary():
+    path = DATA / "competency_summary.csv"
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path)
+
+@st.cache_data
+def load_profession_competency_map():
+    path = DATA / "profession_competency_map.csv"
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path)
+
 @st.cache_data
 def load_kgs():
     with open(DATA/"knowledge_groups.json", encoding="utf-8") as f:
@@ -470,97 +534,30 @@ def load_kgs():
 # ─── HELPERS ─────────────────────────────────────────────────────────────
 
 def match_offers(offers, user_text, selected_cats, kg, n_per_source=30, params=None):
-    """
-    Two-stage relevance scoring:
-    1. Keyword score (always) — title-weighted, length-normalised
-    2. Semantic score (if HF_TOKEN set) — cosine similarity via multilingual embeddings
-
-    HW source +1.5, local geo +3.0/+1.5, delivery mode match +2.0
-    Returns top 60 by combined score.
-    """
-    if not user_text.strip():
+    """TF-IDF primary search + optional HF re-ranking of top 20."""
+    try:
+        vec, mat, ids = build_tfidf_index(str(DATA / "offers.csv"))
+        results = tfidf_search(user_text, vec, mat, ids, offers, params=params)
+    except Exception as e:
+        st.warning(f"Suchindex-Fehler: {e}")
         return offers.head(0)
-
-    user_words   = tokenize(user_text)
-    user_stems   = {w[:5] for w in user_words if len(w) >= 4}
-    user_delivery = get_delivery_mode(params.get("format","") if params else "")
-    user_degree   = str(params.get("degree","")).lower() if params else ""
-
-    # ── Keyword scoring ───────────────────────────────────────────────
-    kw_scores = []
-    for r in offers.itertuples(index=False):
-        s = 0.0
-        title = str(r.title or "").lower()
-        desc  = str(r.description or "").lower()
-        tw = tokenize(title); dw = tokenize(desc)
-        ts = {w[:5] for w in tw if len(w)>=4}
-        ds = {w[:5] for w in dw if len(w)>=4}
-        dlen = max(len(dw), 1)
-
-        t_exact = user_words & tw
-        t_stem  = (user_stems & ts) - user_words
-        s += len(t_exact) * 5.0
-        s += len(t_stem)  * 2.0
-
-        import math as _math
-        d_exact = user_words & dw
-        d_stem  = (user_stems & ds) - user_words - t_exact
-        if d_exact:
-            s += _math.log(1 + len(d_exact)) / _math.log(1 + dlen) * 8
-        if d_stem:
-            s += _math.log(1 + len(d_stem))  / _math.log(1 + dlen) * 3
-
-        for cat in selected_cats:
-            if getattr(r, cat, False): s += 2.0
-        if kg and str(r.knowledgeGroup or "") == kg: s += 1.5
-
-        # Source / geo / format / degree boosts
-        if r.source == "hochundweit": s += 1.5
-        geo = str(r.geo_tier or "")
-        if geo == "wildau":      s += 3.0
-        elif geo == "berlin_bb": s += 1.5
-        row_mode = str(getattr(r, "delivery_mode", "") or "")
-        if row_mode == user_delivery: s += 2.0
-        elif user_delivery in ("hybrid_location","in_person") and row_mode in ("hybrid_location","in_person"): s += 1.0
-        row_deg = str(r.degree or "").lower()
-        if user_degree and row_deg and user_degree[:4] in row_deg[:4]: s += 1.5
-
-        kw_scores.append(s)
-
-    o2 = offers.copy()
-    o2["_kw"] = kw_scores
-    o2 = o2[o2["_kw"] >= 2.0].sort_values("_kw", ascending=False)
-
-    # ── Semantic scoring (HuggingFace) ────────────────────────────────
-    if HF_TOKEN and len(o2) > 0:
-        # Embed user query
-        user_vecs = embed_texts((user_text,))
-        if user_vecs:
-            user_vec = user_vecs[0]
-            if isinstance(user_vec[0], list):  # mean pool if token-level
-                user_vec = [sum(col)/len(col) for col in zip(*user_vec)]
-
-            # Embed offer titles (top 120 by keyword to limit API calls)
-            top_pool = o2.head(120)
-            ids_texts = tuple(
-                (str(r.id), (str(r.title or "") + " " + str(r.description or ""))[:300])
-                for r in top_pool.itertuples(index=False)
-            )
-            offer_vecs = get_offer_embeddings(ids_texts)
-
-            if offer_vecs:
-                sem_scores = []
-                for r in top_pool.itertuples(index=False):
-                    vec = offer_vecs.get(str(r.id))
-                    sem_scores.append(cosine_sim(user_vec, vec) * 5.0 if vec else 0.0)
-
-                top_pool = top_pool.copy()
-                top_pool["_sem"] = sem_scores
-                top_pool["_score"] = top_pool["_kw"] + top_pool["_sem"]
-                return top_pool.sort_values("_score", ascending=False).head(60).reset_index(drop=True)
-
-    o2["_score"] = o2["_kw"]
-    return o2.head(60).reset_index(drop=True)
+    if results.empty:
+        return results
+    if HF_TOKEN and len(results) >= 5:
+        top20 = results.head(20)
+        texts = tuple(
+            (str(r.title or "")+" "+str(r.description or ""))[:250]
+            for r in top20.itertuples(index=False)
+        )
+        hf_sc = hf_rerank(user_text, texts)
+        if hf_sc:
+            top20 = top20.copy()
+            top20["_score"] = top20["_score"]*0.5 + pd.Series(hf_sc, index=top20.index)*0.5
+            rest  = results.iloc[20:].copy()
+            results = pd.concat([
+                top20.sort_values("_score", ascending=False), rest
+            ]).reset_index(drop=True)
+    return results
 
 
 def score_badge(score, label):
@@ -891,15 +888,16 @@ def phase_1(offers, params):
         elif len(hw_act) < 3:
             st.caption("Zu wenige Preisangaben für Statistik.")
 
+    _hf_st = "✓ Semantische Re-Ranking aktiv" if HF_TOKEN else "Schlüsselwort-Suche (TF-IDF)"
     st.caption(
-        "Angebote nach Relevanz sortiert. Hochschulangebote und lokale Angebote "
-        "werden höher gewichtet. Häkchen entfernen, um ein Angebot aus der Statistik auszuschließen."
+        f"Relevanz-Suche: TF-IDF + strukturelle Gewichtung · {_hf_st}. "
+        "Häkchen entfernen = aus Statistik ausschließen."
     )
     show_offers(matched, "all", show_price_stats=True)
     return matched
 
 
-def phase_2(berufe_df, demand, params):
+def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
     section_header("#fff0d4", "4. Nachfrage — wer braucht diesen Kurs?")
     if not params["user_text"].strip():
         st.info("Bitte Kurstitel und Beschreibung eingeben."); return []
@@ -1057,6 +1055,73 @@ def phase_2(berufe_df, demand, params):
                  .rename(columns={"beruf_name":"Berufsbezeichnung"}),
                  use_container_width=True, hide_index=True)
 
+    # ── Competency demand ───────────────────────────────────────────
+    if comp_demand is not None and not comp_demand.empty and all_kldb:
+        st.write("---")
+        st.markdown("**Nachgefragte Kompetenzen für diese Berufsgruppen**")
+        st.caption(
+            "Die gefragten Kompetenzen basieren auf offiziellen BERUFENET-Kompetenzprofilen "
+            "der Bundesagentur für Arbeit, gewichtet nach regionaler Stellennachfrage."
+        )
+
+        # Get competencies for confirmed professions via pcmap
+        if comp_map is not None and not comp_map.empty:
+            kldb_str = [str(k) for k in all_kldb]
+            relevant = comp_map[comp_map["kldb_id"].astype(str).isin(kldb_str)]
+            if not relevant.empty:
+                top_comps = (relevant
+                    .groupby(["competency_name","competency_code","competency_type"],
+                              as_index=False)
+                    .agg(agg_score=("match_score","sum"),
+                         n_professions=("profession_id","nunique"))
+                    .sort_values("agg_score", ascending=False)
+                    .head(40))
+
+                # Join with regional demand
+                comp_with_demand = top_comps.merge(
+                    comp_demand[comp_demand["region"].isin(
+                        ["Dahme-Spreewald","Oder-Spree","Teltow-Fläming","Berlin","Brandenburg"]
+                    )].groupby("competency_name", as_index=False).agg(
+                        total_jobs=("total_jobs","sum"),
+                        avg_growth=("avg_growth","mean"),
+                        demand_score=("demand_score","mean"),
+                    ),
+                    on="competency_name", how="left"
+                ).sort_values("agg_score", ascending=False).head(25)
+
+                if not comp_with_demand.empty:
+                    # Colour-code by growth
+                    comp_with_demand["Wachstum"] = comp_with_demand["avg_growth"].apply(
+                        lambda x: f"{x*100:+.1f}%" if pd.notna(x) else "n/a")
+                    comp_with_demand["Relevanz"] = comp_with_demand["agg_score"].apply(
+                        lambda x: round(min(x / comp_with_demand["agg_score"].max() * 10, 10), 1))
+
+                    # Chip display
+                    cols_c = st.columns(3)
+                    for i, (_, row) in enumerate(comp_with_demand.head(15).iterrows()):
+                        growth_val = row["avg_growth"] if pd.notna(row.get("avg_growth")) else 0
+                        bg  = "#e1f5ee" if growth_val > 0.05 else "#faeeda" if growth_val > -0.05 else "#fee2e2"
+                        txt = "#085041" if growth_val > 0.05 else "#6b3800" if growth_val > -0.05 else "#7f1d1d"
+                        with cols_c[i % 3]:
+                            st.markdown(
+                                f'<div style="background:{bg};color:{txt};border-radius:7px;'
+                                f'padding:7px 12px;margin:3px 0;font-size:13px;line-height:1.4">'
+                                f'<strong>{row["competency_name"]}</strong><br>'
+                                f'<span style="font-size:11px">Wachstum: {row["Wachstum"]}</span>'
+                                f'</div>',
+                                unsafe_allow_html=True)
+
+                    # Table for all 25
+                    with st.expander("Alle Kompetenzen anzeigen"):
+                        display_comps = comp_with_demand[[
+                            "competency_name","competency_type","Relevanz","Wachstum","n_professions"
+                        ]].rename(columns={
+                            "competency_name":"Kompetenz",
+                            "competency_type":"Typ",
+                            "n_professions":"Berufe"
+                        })
+                        st.dataframe(display_comps, use_container_width=True, hide_index=True)
+
     return all_kldb
 
 
@@ -1200,10 +1265,13 @@ def feedback_section():
 # ─── MAIN ────────────────────────────────────────────────────────────────
 
 def main():
-    offers = load_offers()
-    demand = load_demand()
-    berufe = load_berufe()
-    kgs    = load_kgs()
+    offers        = load_offers()
+    demand        = load_demand()
+    berufe        = load_berufe()
+    kgs           = load_kgs()
+    comp_demand   = load_competency_demand()
+    comp_summary  = load_competency_summary()
+    comp_map      = load_profession_competency_map()
 
     with st.sidebar:
         st.markdown("""
@@ -1311,7 +1379,7 @@ Kalkulation realistisch ist.
         st.write("---")
         matched = phase_1(offers, params)
         st.write("---")
-        phase_2(berufe, demand, params)
+        phase_2(berufe, demand, params, comp_demand, comp_map)
         st.write("---")
         phase_3(offers, params, matched)
         feedback_section()
