@@ -237,42 +237,78 @@ def build_tfidf_index(path: str):
     return vec, mat, ids
 
 
+_COMP_SYNONYMS = {
+    "gebäudetechnik":"Gebäudesystemtechnik Versorgungstechnik Haustechnik",
+    "wärmewende":"Wärmepumpenanlagen Heizungstechnik Energieeffizienz",
+    "automobilindustrie":"Fahrzeugtechnik Fahrzeugelektronik Infotainment",
+    "automotive":"Fahrzeugtechnik Fahrzeugelektronik",
+    "embedded":"Embedded Systems SPS-Programmierung Automatisierungstechnik",
+    "sps":"SPS-Programmierung SPS-Technik",
+    "cloud":"Cloud Computing Cloud-Sicherheit",
+    "devops":"DevOps-Tools DevOps Agile Softwareentwicklung",
+    "cybersecurity":"Cybersecurity IT-Sicherheit Datensicherheit",
+    "nis2":"Cybersecurity IT-Sicherheit",
+    "ki":"KI-Systeme KI-Tools Maschinelles Lernen",
+    "iot":"IoT-Plattformen Internet of Things Embedded Systems",
+    "nachhaltigkeit":"Nachhaltigkeitsmanagement Umweltmanagement",
+    "lean":"Lean Management Prozessoptimierung",
+    "dsgvo":"Datenschutz Compliance",
+    "digitalisierung":"Digitale Transformation Prozessautomatisierung",
+}
+_COMP_STOP = {"in","der","die","das","und","für","mit","von","zu","dem","den","des",
+              "ein","eine","einer","eines","einem","an","am","im","ist","sind",
+              "auf","bei","nach","aus","als","oder","auch","sich","über","durch"}
+_SHORT_TECH = {"ki","it","iot","sap","crm","bi","ai","ml","api","sps","nis2","dsgvo","bim"}
+
+def _expand_comp_query(text):
+    import re as _re
+    extras = [_COMP_SYNONYMS[w] for w in _re.findall(r'\b\w+\b', text.lower())
+              if w in _COMP_SYNONYMS]
+    return (text + " " + " ".join(extras)) if extras else text
+
+def _comp_qtokens(text):
+    import re as _re
+    toks = set(_re.findall(r'\b\w+\b', text.lower()))
+    return {t for t in toks if (len(t)>=4 or t in _SHORT_TECH) and t not in _COMP_STOP}
+
+def _token_overlap(qtoks, comp_name):
+    import re as _re
+    ctoks  = set(_re.findall(r'\b\w+\b', comp_name.lower()))
+    cstems = {t[:5] for t in ctoks  if len(t)>=4}
+    qstems = {t[:5] for t in qtoks  if len(t)>=4}
+    return (len(qtoks & ctoks)*2 + len(qstems & cstems)) / max(len(qtoks)*2, 1)
+
 @st.cache_resource(show_spinner=False)
 def build_comp_index(comp_demand_path: str):
-    """TF-IDF (word + char) index over competency names for topic→competency matching."""
     from sklearn.feature_extraction.text import TfidfVectorizer
-    cd = pd.read_csv(comp_demand_path)
-    names = cd["competency_name"].dropna().unique()
-    vec_w = TfidfVectorizer(min_df=1, ngram_range=(1,2), sublinear_tf=True)
-    mat_w = vec_w.fit_transform(names)
-    vec_c = TfidfVectorizer(min_df=1, analyzer="char_wb", ngram_range=(4,6), sublinear_tf=True)
-    mat_c = vec_c.fit_transform(names)
-    return vec_w, mat_w, vec_c, mat_c, names
+    names = pd.read_csv(comp_demand_path)["competency_name"].dropna().unique()
+    vec   = TfidfVectorizer(min_df=1, ngram_range=(1,2), sublinear_tf=True,
+                            stop_words=list(_COMP_STOP))
+    mat   = vec.fit_transform(names)
+    return vec, mat, names
 
-def suggest_comps_for_query(query: str, comp_demand: pd.DataFrame,
-                             top_n: int = 15, min_score: float = 0.06) -> pd.DataFrame:
+def suggest_comps_for_query(query, comp_demand, top_n=15):
     from sklearn.metrics.pairwise import cosine_similarity
     import numpy as _np
     if not query.strip(): return pd.DataFrame()
-    vec_w, mat_w, vec_c, mat_c, names = build_comp_index(str(DATA/"competency_demand.csv"))
-    q_w  = vec_w.transform([query])
-    q_c  = vec_c.transform([query])
-    sims = cosine_similarity(q_w, mat_w)[0]*0.6 + cosine_similarity(q_c, mat_c)[0]*0.4
-    top_idx = _np.argsort(sims)[::-1][:top_n*4]
+    expanded = _expand_comp_query(query)
+    qtoks    = _comp_qtokens(expanded)
+    if not qtoks: return pd.DataFrame()
+    vec, mat, names = build_comp_index(str(DATA/"competency_demand.csv"))
+    sims = cosine_similarity(vec.transform([expanded]), mat)[0]
     rows = []
-    for i in top_idx:
-        if sims[i] < min_score or len(rows) >= top_n: break
+    for i in _np.argsort(sims)[::-1][:top_n*8]:
+        if sims[i] < 0.06: break
         name = names[i]
+        if _token_overlap(qtoks, name) < 0.12: continue
         local = comp_demand[
             comp_demand["competency_name"].eq(name) &
             comp_demand["region"].isin(["Dahme-Spreewald","Oder-Spree","Teltow-Fläming","Berlin"])
         ]
-        rows.append({
-            "competency_name": name,
-            "sim":             round(float(sims[i]), 3),
-            "avg_growth":      local["avg_growth"].mean() if not local.empty else None,
-            "weighted_jobs":   local["weighted_jobs"].sum() if not local.empty else 0,
-        })
+        rows.append({"competency_name":name, "sim":round(float(sims[i]),3),
+                     "avg_growth": local["avg_growth"].mean() if not local.empty else None,
+                     "weighted_jobs": local["weighted_jobs"].sum() if not local.empty else 0})
+        if len(rows) >= top_n: break
     return pd.DataFrame(rows)
 
 def comps_to_professions(selected_names: list, comp_map: pd.DataFrame,
@@ -981,27 +1017,15 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
             g   = row.get("avg_growth")
             wj  = row.get("weighted_jobs", 0)
             sel = row["competency_name"] in st.session_state.selected_comps
-            # Colour: selected=green, else growth-coded
-            if sel:
-                bg, tc = "#0f6e56", "#fff"
-            elif pd.notna(g) and g > 0.05:
-                bg, tc = "#e1f5ee", "#085041"
-            elif pd.notna(g) and g < -0.05:
-                bg, tc = "#fee2e2", "#7f1d1d"
-            else:
-                bg, tc = "#faeeda", "#6b3800"
-            g_str  = f"{g*100:+.1f}%" if pd.notna(g) else "n/a"
+            g_str  = f"{g*100:+.1f}%" if pd.notna(g) else ""
             wj_str = f"{int(wj):,} Stellen" if wj > 0 else ""
+            meta   = "  ·  ".join(filter(None,[g_str,wj_str]))
+            prefix = "✓ " if sel else ""
+            label  = f"{prefix}{row['competency_name'][:44]}\n{meta}" if meta else f"{prefix}{row['competency_name'][:44]}"
             with cols[i % 3]:
-                st.markdown(
-                    f'<div style="background:{bg};color:{tc};border-radius:8px;'
-                    f'padding:8px 12px;margin:3px 0;font-size:13px;line-height:1.4">'
-                    f'<strong>{row["competency_name"][:42]}</strong><br>'
-                    f'<span style="font-size:11px">{g_str}'
-                    f'{" · " + wj_str if wj_str else ""}</span></div>',
-                    unsafe_allow_html=True)
-                btn_label = "✓ Ausgewählt" if sel else "+ Auswählen"
-                if st.button(btn_label, key=f"comp_btn_{i}", use_container_width=True):
+                if st.button(label, key=f"comp_btn_{i}",
+                             use_container_width=True,
+                             type="primary" if sel else "secondary"):
                     if sel:
                         st.session_state.selected_comps.discard(row["competency_name"])
                     else:
@@ -1091,14 +1115,8 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
                     if not ds.empty:
                         g = ds["percentage_diff_previous_year"].mean()
                         growth_str = f"{g*100:+.1f}%"
-                gc = "#27ae60" if growth_str.startswith("+") else "#c0392b" if growth_str.startswith("-") else "#888"
-                st.markdown(
-                    f'<div style="border:1.5px solid #e0e0e0;border-radius:8px;'
-                    f'padding:9px 12px;margin:3px 0;background:#fafafa;font-size:13px">'
-                    f'<strong>{beruf[:40]}</strong>'
-                    f'{"<br><span style='color:" + gc + ";font-size:11px'>" + growth_str + "</span>" if growth_str else ""}'
-                    f'</div>', unsafe_allow_html=True)
-                if st.button("+ Bestätigen", key=f"nd_conf_{j}"):
+                label_p = f"{beruf[:44]}\n{growth_str}" if growth_str else beruf[:44]
+                if st.button(label_p, key=f"nd_conf_{j}", use_container_width=True):
                     st.session_state.confirmed_berufe.add(beruf)
                     st.rerun()
 
