@@ -3,4 +3,4 @@ pandas>=2.0
 plotly>=5.18
 python-docx
 requests
-pydeck>=0.9
+scikit-learn>=1.3
