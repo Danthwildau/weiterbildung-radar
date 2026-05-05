@@ -65,7 +65,7 @@ ects_prefill = radar.get("ects", 0) or 0
 workload_min = ects_prefill * 25
 workload_max = ects_prefill * 30
 
-# Lernziel suggestions based on selected categories
+# Lernziel suggestions: template-based + selected competencies from Radar
 templates = load_lernziel_templates()
 selected_cats = radar.get("selected_cats", [])
 suggested_lernziele = []
@@ -73,6 +73,13 @@ for cat in selected_cats:
     suggested_lernziele.extend(templates.get(cat, []))
 if not suggested_lernziele:
     suggested_lernziele = templates.get("default", [])
+
+# Add competency-derived Lernziele from Phase 2 selections
+selected_competencies = radar.get("selected_competencies", [])
+for comp in selected_competencies[:8]:  # cap at 8 to avoid overload
+    lz = f"Die Teilnehmenden kennen und verstehen: {comp}"
+    if lz not in suggested_lernziele:
+        suggested_lernziele.append(lz)
 
 # ─── PAGE ────────────────────────────────────────────────────────────
 
@@ -157,7 +164,11 @@ inhalte_text = st.text_area(
 
 if suggested_lernziele:
     st.markdown("**Vorgeschlagene Lernziele** — anklicken zum Hinzufügen:")
-    hint("Diese Vorschläge basieren auf den thematischen Schwerpunkten aus dem Radar.")
+    comp_count = len(radar.get("selected_competencies", []))
+    if comp_count:
+        hint(f"Vorschläge aus thematischen Schwerpunkten + {comp_count} im Radar gewählten Kompetenzen.")
+    else:
+        hint("Diese Vorschläge basieren auf den thematischen Schwerpunkten aus dem Radar.")
 
     if "selected_lernziele" not in st.session_state:
         st.session_state.selected_lernziele = set()

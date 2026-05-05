@@ -236,6 +236,54 @@ def build_tfidf_index(path: str):
     mat = vec.fit_transform(df["_text"])
     return vec, mat, ids
 
+
+@st.cache_resource(show_spinner=False)
+def build_comp_index(comp_demand_path: str):
+    """TF-IDF (word + char) index over competency names for topic→competency matching."""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    cd = pd.read_csv(comp_demand_path)
+    names = cd["competency_name"].dropna().unique()
+    vec_w = TfidfVectorizer(min_df=1, ngram_range=(1,2), sublinear_tf=True)
+    mat_w = vec_w.fit_transform(names)
+    vec_c = TfidfVectorizer(min_df=1, analyzer="char_wb", ngram_range=(4,6), sublinear_tf=True)
+    mat_c = vec_c.fit_transform(names)
+    return vec_w, mat_w, vec_c, mat_c, names
+
+def suggest_comps_for_query(query: str, comp_demand: pd.DataFrame,
+                             top_n: int = 15, min_score: float = 0.06) -> pd.DataFrame:
+    from sklearn.metrics.pairwise import cosine_similarity
+    import numpy as _np
+    if not query.strip(): return pd.DataFrame()
+    vec_w, mat_w, vec_c, mat_c, names = build_comp_index(str(DATA/"competency_demand.csv"))
+    q_w  = vec_w.transform([query])
+    q_c  = vec_c.transform([query])
+    sims = cosine_similarity(q_w, mat_w)[0]*0.6 + cosine_similarity(q_c, mat_c)[0]*0.4
+    top_idx = _np.argsort(sims)[::-1][:top_n*4]
+    rows = []
+    for i in top_idx:
+        if sims[i] < min_score or len(rows) >= top_n: break
+        name = names[i]
+        local = comp_demand[
+            comp_demand["competency_name"].eq(name) &
+            comp_demand["region"].isin(["Dahme-Spreewald","Oder-Spree","Teltow-Fläming","Berlin"])
+        ]
+        rows.append({
+            "competency_name": name,
+            "sim":             round(float(sims[i]), 3),
+            "avg_growth":      local["avg_growth"].mean() if not local.empty else None,
+            "weighted_jobs":   local["weighted_jobs"].sum() if not local.empty else 0,
+        })
+    return pd.DataFrame(rows)
+
+def comps_to_professions(selected_names: list, comp_map: pd.DataFrame,
+                          top_n: int = 15) -> pd.DataFrame:
+    if not selected_names or comp_map.empty: return pd.DataFrame()
+    rel = comp_map[comp_map["competency_name"].isin(selected_names)]
+    if rel.empty: return pd.DataFrame()
+    return (rel.groupby(["profession_name","kldb_id"], as_index=False)
+               .agg(n_comps=("competency_name","nunique"), weight=("weight","sum"))
+               .sort_values("n_comps", ascending=False).head(top_n))
+
 def tfidf_search(user_text, vectorizer, matrix, ids, offers_df, params=None, top_n=60):
     from sklearn.metrics.pairwise import cosine_similarity as _cos
     import numpy as _np
@@ -623,7 +671,7 @@ def section_header(color_hex, label):
 
 def phase_0(kgs):
     # ── Kursbeschreibung ──────────────────────────────────────────────
-    section_header("#dceefb", "1. Kursbeschreibung")
+    section_header("#dceefb", "1. Eckdaten zum Angebot")
     with st.container():
         c1, c2 = st.columns([3,2])
         with c1:
@@ -898,108 +946,197 @@ def phase_1(offers, params):
 
 
 def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
-    section_header("#fff0d4", "4. Nachfrage — wer braucht diesen Kurs?")
-    if not params["user_text"].strip():
-        st.info("Bitte Kurstitel und Beschreibung eingeben."); return []
+    section_header("#fff0d4", "3. Nachfrage — Kompetenzen und Berufsgruppen")
 
-    current_input = params["user_text"]
+    user_text = params.get("user_text","").strip()
+    if not user_text:
+        st.info("Bitte Kurstitel und Beschreibung in Schritt 1 eingeben.")
+        return []
 
-    # ── Session state ────────────────────────────────────────────────
-    if "confirmed_berufe"  not in st.session_state: st.session_state.confirmed_berufe  = set()
-    if "last_nd_input"     not in st.session_state: st.session_state.last_nd_input     = ""
-    if "nd_base"           not in st.session_state: st.session_state.nd_base           = []
-    if "nd_shown_count"    not in st.session_state: st.session_state.nd_shown_count    = 5
-    if "nd_pool"           not in st.session_state: st.session_state.nd_pool           = []
+    # ── STEP A: Competency suggestions ───────────────────────────────────
+    st.markdown("#### Welche Kompetenzen vermittelt Ihr Kurs?")
+    st.caption(
+        "Basierend auf Ihrem Kurstitel und Ihrer Beschreibung wurden folgende Kompetenzen "
+        "vorgeschlagen. Wählen Sie alle aus, die Ihr Kurs abdecken soll. "
+        "Die Auswahl bestimmt sowohl den Kompetenz-Score als auch die vorgeschlagenen Zielgruppen."
+    )
 
-    # Recompute only when text changes
-    if current_input != st.session_state.last_nd_input:
-        st.session_state.last_nd_input   = current_input
-        st.session_state.confirmed_berufe = set()
-        st.session_state.nd_shown_count  = 5
-        base = match_berufe(berufe_df, current_input, n=30)
-        st.session_state.nd_base  = [b["beruf_name"] for b in base]
-        st.session_state.nd_pool  = st.session_state.nd_base.copy()
+    if comp_demand is None or comp_demand.empty:
+        st.warning("Kompetenz-Daten nicht verfügbar.")
+        suggested_df = pd.DataFrame()
+    else:
+        suggested_df = suggest_comps_for_query(user_text, comp_demand, top_n=15)
+
+    if "selected_comps" not in st.session_state:
+        st.session_state.selected_comps = set()
+
+    # Reset if query changed
+    if st.session_state.get("_last_query") != user_text:
+        st.session_state.selected_comps = set()
+        st.session_state._last_query = user_text
+
+    if not suggested_df.empty:
+        cols = st.columns(3)
+        for i, row in suggested_df.iterrows():
+            g   = row.get("avg_growth")
+            wj  = row.get("weighted_jobs", 0)
+            sel = row["competency_name"] in st.session_state.selected_comps
+            # Colour: selected=green, else growth-coded
+            if sel:
+                bg, tc = "#0f6e56", "#fff"
+            elif pd.notna(g) and g > 0.05:
+                bg, tc = "#e1f5ee", "#085041"
+            elif pd.notna(g) and g < -0.05:
+                bg, tc = "#fee2e2", "#7f1d1d"
+            else:
+                bg, tc = "#faeeda", "#6b3800"
+            g_str  = f"{g*100:+.1f}%" if pd.notna(g) else "n/a"
+            wj_str = f"{int(wj):,} Stellen" if wj > 0 else ""
+            with cols[i % 3]:
+                st.markdown(
+                    f'<div style="background:{bg};color:{tc};border-radius:8px;'
+                    f'padding:8px 12px;margin:3px 0;font-size:13px;line-height:1.4">'
+                    f'<strong>{row["competency_name"][:42]}</strong><br>'
+                    f'<span style="font-size:11px">{g_str}'
+                    f'{" · " + wj_str if wj_str else ""}</span></div>',
+                    unsafe_allow_html=True)
+                btn_label = "✓ Ausgewählt" if sel else "+ Auswählen"
+                if st.button(btn_label, key=f"comp_btn_{i}", use_container_width=True):
+                    if sel:
+                        st.session_state.selected_comps.discard(row["competency_name"])
+                    else:
+                        st.session_state.selected_comps.add(row["competency_name"])
+                    st.rerun()
+
+    selected = st.session_state.selected_comps
+
+    # ── Kompetenz-Score ───────────────────────────────────────────────────
+    if selected and comp_demand is not None and not comp_demand.empty:
+        st.write("")
+        local = comp_demand[
+            comp_demand["competency_name"].isin(selected) &
+            comp_demand["region"].isin(["Dahme-Spreewald","Oder-Spree","Teltow-Fläming","Berlin"])
+        ]
+        if not local.empty:
+            avg_g  = local["avg_growth"].mean()
+            tot_wj = local["weighted_jobs"].sum()
+            # Score 1–10: based on average growth of selected competencies
+            raw    = min(10, max(1, round(5 + avg_g * 30)))
+            trend  = "wachsend" if avg_g > 0.05 else "stabil" if avg_g > -0.05 else "rückläufig"
+            csc1, csc2 = st.columns([1,3])
+            with csc1:
+                score_badge(raw, f"Kompetenz-Trend: {trend}")
+            with csc2:
+                st.caption(
+                    f"**{len(selected)} Kompetenzen ausgewählt** — "
+                    f"Ø-Wachstum: {avg_g*100:+.1f}% · "
+                    f"Gewichtete Stellennachfrage: {int(tot_wj):,}"
+                )
+                st.caption(
+                    "Grüne Chips = wachsende Kompetenz in der Region. "
+                    "Ausgewählte Kompetenzen erscheinen als Lernziel-Vorschläge in der Angebotsbeschreibung."
+                )
+
+    st.write("---")
+
+    # ── STEP B: Profession suggestions from competencies ─────────────────
+    st.markdown("#### Welche Berufsgruppen profitieren von diesem Kurs?")
+    st.caption(
+        "Diese Berufsgruppen wurden aus Ihren gewählten Kompetenzen und dem Kurstext abgeleitet. "
+        "Bestätigen Sie die relevanten Gruppen — sie bilden die Grundlage für die Nachfrageanalyse."
+    )
+
+    # Derive candidate professions: from competencies first, then text fallback
+    if selected and comp_map is not None and not comp_map.empty:
+        comp_profs = comps_to_professions(list(selected), comp_map, top_n=20)
+        comp_prof_names = comp_profs["profession_name"].tolist() if not comp_profs.empty else []
+    else:
+        comp_prof_names = []
+
+    # Also match by text (existing logic) — merge both sources
+    text_matches = match_berufe(berufe_df, user_text, n=15)
+    text_prof_names = [b["beruf_name"] for b in text_matches]
+
+    # Combined pool: comp-derived first, then text-derived, deduplicated
+    all_candidates = list(dict.fromkeys(comp_prof_names + text_prof_names))[:20]
+
+    if "confirmed_berufe" not in st.session_state: st.session_state.confirmed_berufe = set()
+    if "nd_pool"          not in st.session_state: st.session_state.nd_pool          = []
+
+    # Refresh pool when query changes
+    if st.session_state.get("_last_query_nd") != user_text or not st.session_state.nd_pool:
+        st.session_state.nd_pool = all_candidates
+        st.session_state._last_query_nd = user_text
+        # Auto-confirm top 3 comp-derived professions
+        if comp_prof_names and not st.session_state.confirmed_berufe:
+            st.session_state.confirmed_berufe = set(comp_prof_names[:3])
 
     confirmed = st.session_state.confirmed_berufe
 
-    # Expand pool when user has made selections
-    if confirmed:
-        all_known = set(st.session_state.nd_pool) | confirmed
-        expansions = expand_berufe(berufe_df, list(confirmed), list(all_known), n=30)
-        new_exp = [e["beruf_name"] for e in expansions if e["beruf_name"] not in all_known]
-        # Add new expansions to pool if not already there
-        for b in new_exp:
-            if b not in st.session_state.nd_pool:
-                st.session_state.nd_pool.append(b)
+    # Show more button
+    shown_count = st.session_state.get("nd_shown", 8)
 
-    # Candidates = pool minus already confirmed, up to shown_count
-    candidates = [b for b in st.session_state.nd_pool if b not in confirmed]
-    shown      = candidates[:st.session_state.nd_shown_count]
-    has_more   = len(candidates) > st.session_state.nd_shown_count
-
-    # ── Instructions ─────────────────────────────────────────────────
-    st.write(
-        "Klicken Sie auf die Kacheln, um Berufsgruppen als Zielgruppe auszuwählen. "
-        "Ausgewählte Kacheln erscheinen grün. Klicken Sie **Weitere Vorschläge**, "
-        "um mehr verwandte Berufsgruppen zu sehen."
-    )
-
-    # ── Tile grid: unconfirmed suggestions ───────────────────────────
-    if shown:
-        cols = st.columns(min(len(shown), 3))
-        changed = False
-        for i, beruf in enumerate(shown):
-            is_exp = beruf not in st.session_state.nd_base
-            tag    = " ↗" if is_exp else ""
-            with cols[i % 3]:
-                # Grey tile — clickable to select
-                if st.button(
-                    beruf + tag,
-                    key=f"tile_add_{beruf}",
-                    use_container_width=True,
-                    help="Klicken zum Auswählen" + (" (verwandter Vorschlag)" if is_exp else ""),
-                ):
+    # Tile grid
+    candidates = [b for b in st.session_state.nd_pool if b not in confirmed][:shown_count]
+    if candidates:
+        tile_cols = st.columns(3)
+        for j, beruf in enumerate(candidates):
+            with tile_cols[j % 3]:
+                b_row = berufe_df[berufe_df["beruf_name"]==beruf]
+                kldb  = int(b_row["kldb_id"].iloc[0]) if not b_row.empty else None
+                growth_str = ""
+                if kldb:
+                    ds = demand[(demand["kldb_id"]==kldb) &
+                                demand["region"].isin(["Berlin","Brandenburg"])]
+                    if not ds.empty:
+                        g = ds["percentage_diff_previous_year"].mean()
+                        growth_str = f"{g*100:+.1f}%"
+                gc = "#27ae60" if growth_str.startswith("+") else "#c0392b" if growth_str.startswith("-") else "#888"
+                st.markdown(
+                    f'<div style="border:1.5px solid #e0e0e0;border-radius:8px;'
+                    f'padding:9px 12px;margin:3px 0;background:#fafafa;font-size:13px">'
+                    f'<strong>{beruf[:40]}</strong>'
+                    f'{"<br><span style='color:" + gc + ";font-size:11px'>" + growth_str + "</span>" if growth_str else ""}'
+                    f'</div>', unsafe_allow_html=True)
+                if st.button("+ Bestätigen", key=f"nd_conf_{j}"):
                     st.session_state.confirmed_berufe.add(beruf)
-                    changed = True
-                # Style via CSS injection (Streamlit buttons cannot be styled directly)
-        if changed:
-            st.rerun()
+                    st.rerun()
 
-    # "Weitere Vorschläge" button
-    col_more, _ = st.columns([1,3])
-    if has_more:
-        if col_more.button("Weitere Vorschläge anzeigen"):
-            st.session_state.nd_shown_count += 5
-            st.rerun()
+        c_more, c_clear = st.columns([1,1])
+        with c_more:
+            if len(st.session_state.nd_pool) > shown_count:
+                if st.button("Weitere Vorschläge"):
+                    st.session_state.nd_shown = shown_count + 5
+                    st.rerun()
+        with c_clear:
+            if st.button("Alle zurücksetzen"):
+                st.session_state.confirmed_berufe = set()
+                st.session_state.nd_shown = 8
+                st.rerun()
 
-    # ── Selected tiles (green) ────────────────────────────────────────
+    # Confirmed berufe
     if confirmed:
-        st.markdown("**Ausgewählt:**")
+        st.markdown("**Bestätigte Berufsgruppen:**")
         cols2 = st.columns(min(len(confirmed), 3))
         changed2 = False
         for i, beruf in enumerate(sorted(confirmed)):
             with cols2[i % 3]:
-                st.markdown(
-                    f'<div style="background:#0f6e56;color:#fff;border-radius:8px;' +
-                    f'padding:9px 12px;margin:2px 0;font-size:13px;line-height:1.4;text-align:center">' +
-                    f'{beruf}</div>',
-                    unsafe_allow_html=True)
-                if st.button("× Entfernen", key=f"del2_{beruf}", use_container_width=True):
+                if st.button(f"✓ {beruf[:38]}  ×", key=f"nd_rem_{beruf[:20]}",
+                             use_container_width=True, type="primary"):
                     st.session_state.confirmed_berufe.discard(beruf)
                     changed2 = True
-        if changed2:
-            st.rerun()
+        if changed2: st.rerun()
     else:
-        st.info("Bitte mindestens eine Berufsgruppe auswählen, um die Nachfrageanalyse zu starten.")
+        st.info("Bitte mindestens eine Berufsgruppe bestätigen, um die Nachfrageanalyse zu starten.")
         return []
 
-    # ── Demand analysis ───────────────────────────────────────────────
+    # ── STEP C: Demand analysis ───────────────────────────────────────────
     st.write("---")
-    all_kldb = berufe_df[berufe_df["beruf_name"].isin(confirmed)]["kldb_id"].astype(int).tolist()
+    all_kldb   = berufe_df[berufe_df["beruf_name"].isin(confirmed)]["kldb_id"].astype(int).tolist()
     demand_sub = demand[demand["kldb_id"].isin(all_kldb)]
 
     if demand_sub.empty:
-        st.warning("Keine Nachfragedaten für diese Berufsgruppen in der Jobmonitor-Datenbank.")
+        st.warning("Keine Nachfragedaten für diese Berufsgruppen.")
         return all_kldb
 
     all_regions = (REGIONS_DISPLAY["TH Wildau Region"] + REGIONS_DISPLAY["Berlin"] +
@@ -1027,8 +1164,7 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
     if rrows:
         rdf = pd.DataFrame(rrows)
         rdf = rdf.set_index("Region").reindex(REGION_ORDER).dropna().reset_index()
-        colors = rdf["Wachstum_%"].apply(
-            lambda x: "#27ae60" if x>5 else "#f39c12" if x>-5 else "#c0392b")
+        colors = rdf["Wachstum_%"].apply(lambda x: "#27ae60" if x>5 else "#f39c12" if x>-5 else "#c0392b")
         fig = go.Figure(go.Bar(
             x=rdf["Region"], y=rdf["Wachstum_%"],
             marker_color=colors,
@@ -1048,79 +1184,67 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
            .agg(Stellen=("total_jobs","sum"),
                 Wachstum_pct=("percentage_diff_previous_year","mean"))
            .sort_values("Wachstum_pct", ascending=False).head(15))
-    top["Wachstum 2024→2025"] = top["Wachstum_pct"].apply(
-        lambda x: f"{x*100:+.1f}%" if pd.notna(x) else "n/a")
+    top["Wachstum 2024→2025"] = top["Wachstum_pct"].apply(lambda x: f"{x*100:+.1f}%" if pd.notna(x) else "n/a")
     top["Stellenausschreibungen"] = top["Stellen"].apply(lambda x: f"{int(x):,}")
     st.dataframe(top[["beruf_name","Stellenausschreibungen","Wachstum 2024→2025"]]
                  .rename(columns={"beruf_name":"Berufsbezeichnung"}),
                  use_container_width=True, hide_index=True)
 
-    # ── Competency demand ───────────────────────────────────────────
+    # ── Competency chips (confirmed professions layer) ────────────────────
     if comp_demand is not None and not comp_demand.empty and all_kldb:
         st.write("---")
         st.markdown("**Nachgefragte Kompetenzen für diese Berufsgruppen**")
         st.caption(
-            "Die gefragten Kompetenzen basieren auf offiziellen BERUFENET-Kompetenzprofilen "
-            "der Bundesagentur für Arbeit, gewichtet nach regionaler Stellennachfrage."
+            "Offizielle Kompetenzprofile aus BERUFENET (Bundesagentur für Arbeit), "
+            "gewichtet nach regionaler Stellennachfrage. "
+            "Grün = wachsend · Gelb = stabil · Rot = rückläufig."
         )
-
-        # Get competencies for confirmed professions via pcmap
         if comp_map is not None and not comp_map.empty:
             kldb_str = [str(k) for k in all_kldb]
             relevant = comp_map[comp_map["kldb_id"].astype(str).isin(kldb_str)]
             if not relevant.empty:
                 top_comps = (relevant
-                    .groupby(["competency_name","competency_code","competency_type"],
-                              as_index=False)
-                    .agg(agg_score=("weight","sum"),
-                         n_professions=("kldb_id","nunique"))
-                    .sort_values("agg_score", ascending=False)
-                    .head(40))
-
-                # Join with regional demand
+                    .groupby(["competency_name","competency_code","competency_type"], as_index=False)
+                    .agg(agg_score=("weight","sum"), n_professions=("kldb_id","nunique"))
+                    .sort_values("agg_score", ascending=False).head(40))
                 comp_with_demand = top_comps.merge(
                     comp_demand[comp_demand["region"].isin(
-                        ["Dahme-Spreewald","Oder-Spree","Teltow-Fläming","Berlin","Brandenburg"]
+                        ["Dahme-Spreewald","Oder-Spree","Teltow-Fläming","Berlin"]
                     )].groupby("competency_name", as_index=False).agg(
                         total_jobs=("total_jobs","sum"),
                         avg_growth=("avg_growth","mean"),
                         demand_score=("demand_score","mean"),
                     ),
                     on="competency_name", how="left"
-                ).sort_values("agg_score", ascending=False).head(25)
+                ).sort_values("agg_score", ascending=False).head(15)
 
                 if not comp_with_demand.empty:
-                    # Colour-code by growth
                     comp_with_demand["Wachstum"] = comp_with_demand["avg_growth"].apply(
                         lambda x: f"{x*100:+.1f}%" if pd.notna(x) else "n/a")
-                    comp_with_demand["Relevanz"] = comp_with_demand["agg_score"].apply(
-                        lambda x: round(min(x / comp_with_demand["agg_score"].max() * 10, 10), 1))
-
-                    # Chip display
                     cols_c = st.columns(3)
-                    for i, (_, row) in enumerate(comp_with_demand.head(15).iterrows()):
-                        growth_val = row["avg_growth"] if pd.notna(row.get("avg_growth")) else 0
-                        bg  = "#e1f5ee" if growth_val > 0.05 else "#faeeda" if growth_val > -0.05 else "#fee2e2"
-                        txt = "#085041" if growth_val > 0.05 else "#6b3800" if growth_val > -0.05 else "#7f1d1d"
+                    for i, (_, row) in enumerate(comp_with_demand.iterrows()):
+                        gv = row["avg_growth"] if pd.notna(row.get("avg_growth")) else 0
+                        bg  = "#e1f5ee" if gv>0.05 else "#faeeda" if gv>-0.05 else "#fee2e2"
+                        txt = "#085041" if gv>0.05 else "#6b3800" if gv>-0.05 else "#7f1d1d"
                         with cols_c[i % 3]:
                             st.markdown(
                                 f'<div style="background:{bg};color:{txt};border-radius:7px;'
                                 f'padding:7px 12px;margin:3px 0;font-size:13px;line-height:1.4">'
-                                f'<strong>{row["competency_name"]}</strong><br>'
+                                f'<strong>{row["competency_name"][:40]}</strong><br>'
                                 f'<span style="font-size:11px">Wachstum: {row["Wachstum"]}</span>'
-                                f'</div>',
-                                unsafe_allow_html=True)
-
-                    # Table for all 25
+                                f'</div>', unsafe_allow_html=True)
                     with st.expander("Alle Kompetenzen anzeigen"):
                         display_comps = comp_with_demand[[
-                            "competency_name","competency_type","Relevanz","Wachstum","n_professions"
-                        ]].rename(columns={
-                            "competency_name":"Kompetenz",
-                            "competency_type":"Typ",
-                            "n_professions":"Berufe"
-                        })
+                            "competency_name","competency_type","Wachstum","n_professions"
+                        ]].rename(columns={"competency_name":"Kompetenz",
+                                           "competency_type":"Typ","n_professions":"Berufe"})
                         st.dataframe(display_comps, use_container_width=True, hide_index=True)
+
+    # Store selected comps in radar_params for Lernziel pre-fill
+    if "radar_params" not in st.session_state:
+        st.session_state.radar_params = {}
+    st.session_state.radar_params["selected_competencies"] = list(
+        st.session_state.get("selected_comps", set()))
 
     return all_kldb
 
@@ -1151,28 +1275,45 @@ def phase_3(offers, params, matched):
         tn_max  = max(int(target * 2.8), target + 15)
         tn_range = list(range(tn_min, tn_max + 1))
 
-        # Price lines bracketing the break-even price
+        # Price lines: break-even + p25/median/p75 from comparable courses
         be_r = round(be_preis / 100) * 100
+
+        # Market percentiles from matched courses
+        mkt_p25 = mkt_med = mkt_p75 = None
+        if priced_all is not None and len(priced_all) >= 3:
+            mkt_p25 = priced_all["price"].quantile(.25)
+            mkt_med = priced_all["price"].median()
+            mkt_p75 = priced_all["price"].quantile(.75)
+
+        # Build price set: break-even + market anchors (if available) + bracket
+        mkt_prices = [p for p in [mkt_p25, mkt_med, mkt_p75] if p is not None]
         price_candidates = sorted(set(filter(lambda p: p > 0, [
-            round(be_preis * 0.5  / 100) * 100,
-            round(be_preis * 0.75 / 100) * 100,
             be_r,
-            round(be_preis * 1.25 / 100) * 100,
-            round(be_preis * 1.6  / 100) * 100,
-        ])))
+            round(be_preis * 0.65 / 100) * 100,
+            round(be_preis * 1.4  / 100) * 100,
+        ] + [round(p / 100) * 100 for p in mkt_prices])))
 
         fig_be = go.Figure()
-        palette = ["#c0392b","#e67e22","#185fa5","#27ae60","#7f77dd"]
+        palette = ["#c0392b","#e67e22","#185fa5","#27ae60","#7f77dd","#9b59b6"]
+        mkt_rounded = {round(p/100)*100 for p in mkt_prices} if mkt_prices else set()
         for i, preis in enumerate(price_candidates):
             revenue = [t * (preis/(1+params["overhead"]) - params["sachkosten"]) - fix_net
                        for t in tn_range]
-            is_be = (preis == be_r)
+            is_be  = (preis == be_r)
+            is_mkt = (preis in mkt_rounded)
+            if is_mkt:
+                which = ("25. Perz." if mkt_p25 and abs(preis - round(mkt_p25/100)*100) < 50
+                         else "Median" if mkt_med and abs(preis - round(mkt_med/100)*100) < 50
+                         else "75. Perz.")
+                label = f"{preis:,.0f} EUR/TN  ← Markt {which}"
+            else:
+                label = f"{preis:,.0f} EUR/TN" + (" ← Break-even" if is_be else "")
             fig_be.add_trace(go.Scatter(
                 x=tn_range, y=revenue, mode="lines",
-                name=f"{preis:,.0f} EUR/TN" + (" ← Break-even" if is_be else ""),
-                line=dict(width=3 if is_be else 1.8,
+                name=label,
+                line=dict(width=3 if is_be else 2 if is_mkt else 1.5,
                           color=palette[i % len(palette)],
-                          dash="solid" if is_be else "dot")))
+                          dash="solid" if is_be else "dashdot" if is_mkt else "dot")))
 
         fig_be.add_hline(y=0, line_color="#333", line_width=1.5)
         fig_be.add_vline(x=target, line_dash="dash", line_color="#555", line_width=1.5,
@@ -1282,47 +1423,53 @@ Dieses Werkzeug unterstützt Lehrende dabei, eine neue Weiterbildungsidee zu ana
 
 ---
 
-### Wie funktioniert die Suche?
+### Schritt 1 — Eckdaten zum Angebot
 
-**Angebotssuche** — Das Werkzeug vergleicht Ihren Kurstitel und Ihre Beschreibung mit über 13.000 Kursen aus hochundweit.de und mein-now.de. Die Ähnlichkeit wird über Schlagwortabgleich berechnet: übereinstimmende Wörter und Wortstämme erhöhen die Punktzahl. Zusätzlich werden thematische Schwerpunkte (PGT/QST) berücksichtigt, wenn Sie diese auswählen. Je mehr Beschreibungstext Sie eingeben, desto besser die Ergebnisse.
-
-**Kategorisierung (PGT/QST)** — Kurse sind in zwei Systemen kategorisiert. Die *Profilgebenden Themen (PGT)* unterscheiden zwischen Verwaltung, Mobilität und Wertschöpfung. Die *Querschnittsthemen (QST)* erfassen übergreifende Dimensionen wie Nachhaltigkeit, Diversity und Internationalisation. Ein Kurs kann mehrere Kategorien haben. Die Kategorisierung basiert auf einem regelbasierten Schlüsselwortsystem.
-
-**Angebots-Score** — Der Score (1–10) gibt an, wie stark der Markt mit ähnlichen Kursen besetzt ist. Er basiert auf der Anzahl der Treffer: 0 Treffer = Score 1 (Marktlücke), über 40 Treffer = Score 10 (sehr gesättigt). Der Score ist kein absolutes Qualitätsurteil — ein Score von 7 bedeutet, dass Differenzierung wichtig ist, nicht dass der Kurs nicht sinnvoll wäre.
+Geben Sie Kurstitel, Kurzbeschreibung und Kostenparameter ein. Je mehr Text Sie eingeben, desto präziser werden alle nachfolgenden Analysen.
 
 ---
 
-### Wie funktioniert die Berufssuche?
+### Schritt 2 — Vergleichsangebote
 
-Das Werkzeug gleicht Ihren Text mit 1.210 Berufsbezeichnungen aus der KldB-Systematik (Klassifikation der Berufe, Bundesagentur für Arbeit) ab. Dabei werden drei Methoden kombiniert:
+**Was wird verglichen?** Ihr Text wird mit über 13.000 Kursen aus hochundweit.de (wissenschaftliche Weiterbildung) und mein-now.de (berufliche Weiterbildung) verglichen — per Schlagwort- und Stammabgleich.
 
-1. **Direkte Wortübereinstimmung** — z.B. "Automatisierung" trifft auf Berufe, die dieses Wort im Namen tragen.
-2. **Stammabgleich** — die ersten fünf Buchstaben werden verglichen, damit "Maschinenbau" auch "Maschinenbauer" findet.
-3. **Konzept-Mapping** — Fachbegriffe wie "KI", "DSGVO" oder "Supply Chain" werden auf die passenden KldB-Berufsgruppen gemappt (z.B. KI → Informatikberufe, DSGVO → Rechts- und Verwaltungsberufe), da diese Begriffe meist nicht direkt in Berufsbezeichnungen vorkommen.
+**Angebots-Score (1–10)** — Wie dicht ist der Markt besetzt? 0 Treffer bei vergleichbaren Hochschulkursen = Score 1 (Marktlücke). Über 40 Treffer = Score 10 (starker Wettbewerb). Ein hoher Score bedeutet nicht, dass der Kurs nicht sinnvoll ist — aber er zeigt, dass Differenzierung wichtig wird.
 
-Nur Berufe ab Spezialistenniveau (KldB-Endziffer 3 oder 4) werden angezeigt.
-
-**Nachfrage-Score** — Der Score (1–10) basiert auf dem medianen prozentualen Wachstum der Stellenanzeigen für die gewählten Berufe in der Region (2024→2025) plus einem Größenbonus für absolute Stellenzahlen. Score 1 = sinkende oder keine Nachfrage, Score 10 = stark wachsende Nachfrage.
+**PGT/QST-Filter** — Kurse sind in thematischen Kategorien hinterlegt (Profilgebende Themen: Verwaltung, Mobilität, Wertschöpfung; Querschnittsthemen: Nachhaltigkeit, Diversity, Internationalisation). Wählen Sie passende Kategorien, um die Suche zu verfeinern.
 
 ---
 
-### Wie wird der Preis berechnet?
+### Schritt 3 — Nachfrage: Kompetenzen und Berufsgruppen
 
-**Break-even-Preis** = ((Entwicklungskosten + Implementierungskosten) / Teilnehmerzahl + Sachkosten pro TN) × (1 + Overhead-Zuschlag)
+**Wie funktionieren die Kompetenzvorschläge?**
+Aus Ihrem Kurstitel und Ihrer Beschreibung werden passende Kompetenzen aus dem offiziellen BERUFENET-System der Bundesagentur für Arbeit vorgeschlagen (5.303 Kompetenzen, abgeglichen über Wort- und Zeichenketten-Ähnlichkeit). Wählen Sie alle Kompetenzen aus, die Ihr Kurs vermitteln soll.
 
-Der Deckungsbeitrags-Chart zeigt, ab wie vielen Teilnehmern verschiedene Preispunkte die Fixkosten decken. Die Marktpreisverteilung zeigt Median, 25. und 75. Perzentil ähnlicher Kurse aus der Datenbank.
+**Kompetenz-Score (1–10)** — Basiert auf dem durchschnittlichen Nachfragewachstum der gewählten Kompetenzen in der TH-Wildau-Region und Berlin/Brandenburg (Quelle: Jobmonitor + BERUFENET, 2024→2025). Grüne Chips = wachsende Kompetenz. Ausgewählte Kompetenzen werden automatisch als Lernziel-Vorschläge in die Angebotsbeschreibung übertragen.
+
+**Wie werden Berufsgruppen vorgeschlagen?**
+Zuerst werden Berufe gesucht, die die gewählten Kompetenzen als Kernkompetenzen einfordern (BERUFENET-Mapping). Ergänzend werden Berufsbezeichnungen direkt mit Ihrem Text abgeglichen (KldB-Systematik, 1.210 Berufsgruppen). Bestätigen Sie die relevanten Berufe — sie bilden die Grundlage für die Nachfrageanalyse.
+
+**Nachfrage-Score (1–10)** — Medianes Wachstum der Stellenanzeigen für die gewählten Berufe, gewichtet nach Region: TH Wildau Region (Dahme-Spreewald, Oder-Spree, Teltow-Fläming) zählt dreifach, Berlin/Brandenburg zweifach.
+
+---
+
+### Schritt 4 — Preisgestaltung
+
+**Break-even-Preis** = ((Entwicklungskosten + Implementierungskosten) / Teilnehmerzahl + Sachkosten/TN) × (1 + Overhead)
+
+Der Deckungsbeitrags-Chart zeigt Ihren Break-even sowie die Marktpreise ähnlicher Kurse: die gestrichelten Linien markieren das 25. Perzentil, den Median und das 75. Perzentil der gefundenen Vergleichskurse.
 
 ---
 
 **Datenquellen**
 
-Angebotsdaten: hochundweit.de und mein-now.de (Stand 2025, über 13.000 Kurse).
-
-Nachfragedaten: Jobmonitor der Bertelsmann Stiftung, Stellenanzeigenanalyse 2024–2025, Regionen Berlin, Brandenburg, Dahme-Spreewald, Oder-Spree, Teltow-Fläming.
+- Kurse: hochundweit.de + mein-now.de, Stand 2025, > 13.000 Kurse
+- Stellennachfrage: Jobmonitor der Bertelsmann Stiftung, Berlin/Brandenburg 2024–2025
+- Kompetenzprofile: BERUFENET, Bundesagentur für Arbeit, 5.303 Kompetenzen
 
 ---
 
-*Dieser Prototyp dient zur Orientierung. Alle Ergebnisse ersetzen keine vollständige Marktanalyse.*
+*Dieser Prototyp dient zur Orientierung und ersetzt keine vollständige Marktanalyse.*
 
 ---
         """)
