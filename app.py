@@ -1072,8 +1072,8 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
                 top_comps = (relevant
                     .groupby(["competency_name","competency_code","competency_type"],
                               as_index=False)
-                    .agg(agg_score=("match_score","sum"),
-                         n_professions=("profession_id","nunique"))
+                    .agg(agg_score=("weight","sum"),
+                         n_professions=("kldb_id","nunique"))
                     .sort_values("agg_score", ascending=False)
                     .head(40))
 
