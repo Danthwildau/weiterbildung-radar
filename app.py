@@ -10,6 +10,8 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
+from usage_logger import log_event, get_session_id
+
 warnings.filterwarnings("ignore")
 
 st.set_page_config(
