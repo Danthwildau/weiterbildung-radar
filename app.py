@@ -1041,10 +1041,10 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
 
     # ── STEP A: Competency suggestions ───────────────────────────────────
     st.markdown("#### Welche Kompetenzen vermittelt Ihr Kurs?")
+_hf_st = "semantische Relevanz (Embeddings)" if HF_TOKEN else "Schlüsselwort-Relevanz (TF-IDF)"
     st.caption(
-        "Basierend auf Ihrem Kurstitel und Ihrer Beschreibung wurden folgende Kompetenzen "
-        "vorgeschlagen. Wählen Sie alle aus, die Ihr Kurs abdecken soll. "
-        "Die Auswahl bestimmt sowohl den Kompetenz-Score als auch die vorgeschlagenen Zielgruppen."
+        f"Vergleichskurse nach {_hf_st}; Region/Format beeinflussen nur die Reihenfolge. "
+        "Häkchen entfernen = aus Statistik ausschließen."
     )
 
     if comp_demand is None or comp_demand.empty:
