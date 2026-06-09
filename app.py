@@ -320,11 +320,21 @@ def comps_to_professions(selected_names: list, comp_map: pd.DataFrame,
                .agg(n_comps=("competency_name","nunique"), weight=("weight","sum"))
                .sort_values("n_comps", ascending=False).head(top_n))
 
-def tfidf_search(user_text, vectorizer, matrix, ids, offers_df, params=None, top_n=60):
+def tfidf_search(user_text, vectorizer, matrix, ids, offers_df, params=None, top_n=120):
+    """
+    Kandidatengenerierung per TF-IDF + Berechnung struktureller Boosts.
+    Filtert NICHT mehr selbst. Gibt pro Kandidat zwei getrennte Werte zurück:
+      _relevance : rein thematische Ähnlichkeit (TF-IDF-Kosinus)
+      _boost     : strukturelle Präferenz (Region/Format/Abschluss/...)
+    Das eigentliche Gate und die finale Sortierung passieren in match_offers.
+    """
     from sklearn.metrics.pairwise import cosine_similarity as _cos
     import numpy as _np
     if not user_text.strip():
-        return offers_df.head(0)
+        out = offers_df.head(0).copy()
+        out["_relevance"] = []
+        out["_boost"] = []
+        return out
     q_vec = vectorizer.transform([user_text])
     sims  = _cos(q_vec, matrix)[0]
     user_delivery = get_delivery_mode(params.get("format","") if params else "")
@@ -348,11 +358,16 @@ def tfidf_search(user_text, vectorizer, matrix, ids, offers_df, params=None, top
             if getattr(r, cat, False): b += 0.03
         if kg and str(r.knowledgeGroup or "") == kg: b += 0.04
         boosts[i] = b
-    final   = sims + boosts
-    top_idx = _np.argsort(final)[::-1][:top_n]
-    result  = offers_df.iloc[top_idx].copy()
-    result["_score"] = final[top_idx]
-    return result[result["_score"] > 0.04].reset_index(drop=True)
+
+    # Nur Kandidaten mit minimaler thematischer Substanz weiterreichen
+    # (kleiner absoluter Boden NUR gegen Null-Rauschen; das eigentliche
+    #  relative Gate kommt in match_offers).
+    cand_idx = _np.argsort(sims)[::-1][:top_n]
+    cand_idx = [i for i in cand_idx if sims[i] > 0.01]
+    result = offers_df.iloc[cand_idx].copy()
+    result["_relevance"] = sims[cand_idx]
+    result["_boost"] = boosts[cand_idx]
+    return result.reset_index(drop=True)
 
 @st.cache_data(show_spinner=False, ttl=1800)
 def hf_rerank(query: str, candidate_texts: tuple) -> list:
@@ -617,8 +632,21 @@ def load_kgs():
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────
 
-def match_offers(offers, user_text, selected_cats, kg, n_per_source=30, params=None):
-    """TF-IDF primary search + optional HF re-ranking of top 20."""
+def match_offers(offers, user_text, selected_cats, kg, n_per_source=30, params=None,
+                 max_results=20, rel_fraction=0.55, rel_floor=0.06):
+    """
+    Vergleichskurs-Suche mit getrenntem Relevanz-Gate und Präferenz-Sortierung.
+
+    Ablauf:
+      1. TF-IDF erzeugt Kandidaten (+ strukturelle Boosts), ohne zu filtern.
+      2. Wo das Embedding-Modell verfügbar ist, wird die SEMANTISCHE Ähnlichkeit
+         zum primären Relevanzmaß (für die Top-Kandidaten). Sonst TF-IDF.
+      3. Relatives Gate: behalte Kurse mit Relevanz >= rel_fraction * Top-Relevanz
+         (und >= rel_floor als absolute Untergrenze gegen Themenfremdes).
+      4. Sortiere die verbleibende Menge nach (Relevanz + Boost) und kappe auf
+         max_results. Boosts beeinflussen also die Reihenfolge, aber nicht mehr,
+         WER ins Set kommt.
+    """
     try:
         vec, mat, ids = build_tfidf_index(str(DATA / "offers.csv"))
         results = tfidf_search(user_text, vec, mat, ids, offers, params=params)
@@ -627,21 +655,43 @@ def match_offers(offers, user_text, selected_cats, kg, n_per_source=30, params=N
         return offers.head(0)
     if results.empty:
         return results
+
+    import numpy as _np
+    results = results.copy()
+    # Primäres Relevanzmaß: zunächst TF-IDF
+    results["_relevance_final"] = results["_relevance"].astype(float)
+
+    # Semantisches Re-Ranking der besten ~40 Kandidaten (das Modell ersetzt
+    # dort das Relevanzmaß, statt es nur 50/50 zu mischen).
     if HF_TOKEN and len(results) >= 5:
-        top20 = results.head(20)
+        n_rank = min(40, len(results))
+        head = results.head(n_rank)
         texts = tuple(
             (str(r.title or "")+" "+str(r.description or ""))[:250]
-            for r in top20.itertuples(index=False)
+            for r in head.itertuples(index=False)
         )
         hf_sc = hf_rerank(user_text, texts)
-        if hf_sc:
-            top20 = top20.copy()
-            top20["_score"] = top20["_score"]*0.5 + pd.Series(hf_sc, index=top20.index)*0.5
-            rest  = results.iloc[20:].copy()
-            results = pd.concat([
-                top20.sort_values("_score", ascending=False), rest
-            ]).reset_index(drop=True)
-    return results
+        if hf_sc and len(hf_sc) == n_rank:
+            sem = _np.array(hf_sc, dtype=float)
+            # Semantik dominiert (0.8), TF-IDF stützt (0.2) — robuster gegen
+            # gelegentliche Ausreißer des Embedding-Endpoints.
+            blended = 0.8 * sem + 0.2 * head["_relevance"].to_numpy()
+            results.loc[head.index, "_relevance_final"] = blended
+
+    # Relatives Gate
+    top_rel = float(results["_relevance_final"].max())
+    if top_rel <= 0:
+        return offers.head(0)
+    threshold = max(rel_floor, rel_fraction * top_rel)
+    kept = results[results["_relevance_final"] >= threshold].copy()
+    if kept.empty:
+        # Fallback: wenigstens den besten Treffer zeigen
+        kept = results.nlargest(1, "_relevance_final").copy()
+
+    # Finale Sortierung: Relevanz + strukturelle Präferenz
+    kept["_score"] = kept["_relevance_final"] + kept["_boost"]
+    kept = kept.sort_values("_score", ascending=False).head(max_results)
+    return kept.reset_index(drop=True)
 
 
 def score_badge(score, label):
@@ -972,9 +1022,9 @@ def phase_1(offers, params):
         elif len(hw_act) < 3:
             st.caption("Zu wenige Preisangaben für Statistik.")
 
-    _hf_st = "✓ Semantische Re-Ranking aktiv" if HF_TOKEN else "Schlüsselwort-Suche (TF-IDF)"
+    __hf_st = "semantische Relevanz (Embeddings)" if HF_TOKEN else "Schlüsselwort-Relevanz (TF-IDF)"
     st.caption(
-        f"Relevanz-Suche: TF-IDF + strukturelle Gewichtung · {_hf_st}. "
+        f"Vergleichskurse nach {_hf_st}; Region/Format beeinflussen nur die Reihenfolge. "
         "Häkchen entfernen = aus Statistik ausschließen."
     )
     show_offers(matched, "all", show_price_stats=True)
