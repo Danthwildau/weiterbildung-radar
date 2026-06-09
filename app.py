@@ -1035,6 +1035,12 @@ def phase_1(offers, params):
 
 def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
     section_header("#fff0d4", "3. Nachfrage — Kompetenzen und Berufsgruppen")
+    if st.session_state.get("_logged_p2") != params.get("user_text"):
+        log_event("phase2_view",
+                  abschluss=params.get("degree"),
+                  wissensgebiet=params.get("kg"),
+                  session_id=st.session_state.get("_usage_sid"))
+        st.session_state["_logged_p2"] = params.get("user_text")
 
     user_text = params.get("user_text","").strip()
     if not user_text:
@@ -1316,6 +1322,12 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
 
 def phase_3(offers, params, matched):
     section_header("#ede0f5", "5. Preisgestaltung")
+    if st.session_state.get("_logged_p3") != params.get("user_text"):
+        log_event("phase3_view",
+                  abschluss=params.get("degree"),
+                  wissensgebiet=params.get("kg"),
+                  session_id=st.session_state.get("_usage_sid"))
+        st.session_state["_logged_p3"] = params.get("user_text")
     priced_all = matched[
     (matched["source"] == "hochundweit") &
     matched["price"].notna() &
@@ -1538,9 +1550,23 @@ Der Deckungsbeitrags-Chart zeigt Ihren Break-even sowie die Marktpreise ähnlich
 
 ---
         """)
+        with st.expander("Datenschutz & Nutzungsstatistik"):
+            st.markdown(
+                "Dieses Werkzeug erfasst **anonyme Nutzungsereignisse** "
+                "(z. B. welche Analyseschritte aufgerufen werden), um das Tool "
+                "zu verbessern. Dabei werden **keine personenbezogenen Daten** "
+                "und **keine Ihrer Eingaben** (Kurstitel, Beschreibung) "
+                "gespeichert. Es werden keine Cookies gesetzt. Erfasst werden "
+                "ausschließlich: Datum (tagesgenau), die Art des Ereignisses "
+                "sowie die gewählte Kategorie (Abschluss, Wissensgebiet)."
+            )
         st.caption("Version 1.0 · TH Wildau 2025")
 
     st.title("Weiterbildungs-Radar")
+    _sid = get_session_id(st.session_state)
+    if not st.session_state.get("_logged_open"):
+        log_event("app_open", session_id=_sid)
+        st.session_state["_logged_open"] = True
     st.markdown(
         "Analysieren Sie Angebot, Nachfrage und Preisgestaltung für Ihre Weiterbildungsidee. "
         "Geben Sie Ihren Kurstitel und eine kurze Beschreibung ein — das Werkzeug führt Sie "
@@ -1588,6 +1614,12 @@ Kalkulation realistisch ist.
     params = phase_0(kgs)
 
     if params["user_text"].strip():
+        if st.session_state.get("_logged_query") != params["user_text"]:
+            log_event("search_run",
+                      abschluss=params.get("degree"),
+                      wissensgebiet=params.get("kg"),
+                      session_id=st.session_state.get("_usage_sid"))
+            st.session_state["_logged_query"] = params["user_text"]
         st.write("---")
         matched = phase_1(offers, params)
         st.write("---")
@@ -1609,6 +1641,10 @@ Kalkulation realistisch ist.
             type="primary",
             use_container_width=False,
         ):
+            log_event("export_click",
+                      abschluss=params.get("degree"),
+                      wissensgebiet=params.get("kg"),
+                      session_id=st.session_state.get("_usage_sid"))
             st.session_state.radar_params = params
             st.switch_page("pages/1_Angebotsbeschreibung.py")
     else:
