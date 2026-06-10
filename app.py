@@ -1035,12 +1035,6 @@ def phase_1(offers, params):
 
 def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
     section_header("#fff0d4", "3. Nachfrage — Kompetenzen und Berufsgruppen")
-    if st.session_state.get("_logged_p2") != params.get("user_text"):
-        log_event("phase2_view",
-                  abschluss=params.get("degree"),
-                  wissensgebiet=params.get("kg"),
-                  session_id=st.session_state.get("_usage_sid"))
-        st.session_state["_logged_p2"] = params.get("user_text")
 
     user_text = params.get("user_text","").strip()
     if not user_text:
@@ -1320,6 +1314,328 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
     return all_kldb
 
 
+# ─── PRICING HELPERS ─────────────────────────────────────────────────────
+
+# Canonical Abschluss keys: map both the phase_0 UI labels AND the HuW
+# data labels to the same key. Allows the data and UI vocabularies to evolve
+# independently. Returns None for Abschluesse without a robust market base
+# (Microcredential, Teilnahmebescheinigung, Abschlusspruefung n=7, Sonstiges).
+_ABSCHLUSS_CANONICAL = {
+    # UI dropdown
+    "zertifikat / hochschulzertifikat":               "zertifikat",
+    "bachelor":                                       "bachelor",
+    "master":                                         "master",
+    # HuW data
+    "zertifikat":                                     "zertifikat",
+    "bachelor/bakkalaureus":                          "bachelor",
+    "ohne abschluss, ggf. mit teilnahmebescheinigung":"ohne_abschluss",
+}
+_ABSCHLUSS_LABEL = {
+    "zertifikat":    "Zertifikat",
+    "bachelor":      "Bachelor",
+    "master":        "Master",
+    "ohne_abschluss":"ohne Abschluss",
+}
+
+def canonical_abschluss(label):
+    """Normalise either a UI or HuW Abschluss string to a canonical key, or None."""
+    if not label:
+        return None
+    return _ABSCHLUSS_CANONICAL.get(str(label).strip().lower())
+
+
+def _hw_priced(offers):
+    """All HuW courses with a usable price."""
+    if offers is None or len(offers) == 0:
+        return offers.iloc[0:0] if offers is not None else None
+    return offers[
+        (offers["source"] == "hochundweit") &
+        offers["price"].notna() &
+        (offers["price"] > 0)
+    ]
+
+
+def _percentile_readout(prices):
+    """Returns (p25, median, p75, n)."""
+    s = pd.to_numeric(prices, errors="coerce").dropna()
+    s = s[s > 0]
+    if len(s) == 0:
+        return None
+    return float(s.quantile(.25)), float(s.median()), float(s.quantile(.75)), int(len(s))
+
+
+def render_marktorientierung(offers, user_degree, target_price=None):
+    """
+    Always-shown broad anchor: all HuW courses of the chosen Abschluss across
+    all of Germany. One sentence + a compact horizontal range bar.
+    """
+    st.markdown("#### Marktorientierung")
+    key = canonical_abschluss(user_degree)
+    label = _ABSCHLUSS_LABEL.get(key)
+    hw = _hw_priced(offers)
+    if hw is None or key is None or label is None:
+        st.info("Marktorientierung nicht verfügbar für diesen Abschlusstyp.")
+        return
+    # Match the canonical key against canonicalised HuW degree values
+    hw_key = hw["degree"].map(canonical_abschluss)
+    sub = hw[hw_key == key]
+    if len(sub) < 30:
+        st.info(f"Marktorientierung nicht verfügbar — zu wenige {label}-Kurse in der Datenbasis.")
+        return
+    p25, med, p75, n = _percentile_readout(sub["price"])
+    s = pd.to_numeric(sub["price"], errors="coerce").dropna()
+    s = s[s > 0]
+    mn, mx = float(s.min()), float(s.max())
+    # One-sentence readout
+    st.markdown(
+        f"**{label}-Programme in Deutschland** kosten typischerweise zwischen "
+        f"**{p25:,.0f} EUR** (p25) und **{p75:,.0f} EUR** (p75), "
+        f"Median **{med:,.0f} EUR**. _Grundlage: {n:,} Kurse aus hochundweit._"
+    )
+    # Compact horizontal range bar (~40px), 5th–95th percentile to control outliers
+    s_sorted = s.sort_values()
+    lo_disp = float(s_sorted.quantile(.05))
+    hi_disp = float(s_sorted.quantile(.95))
+    fig = go.Figure()
+    # Whisker line lo_disp -> hi_disp, IQR box p25 -> p75, markers for median
+    # and (optionally) target price.
+    fig.add_trace(go.Scatter(
+        x=[lo_disp, hi_disp], y=[0, 0],
+        mode="lines", line=dict(color="#bcd2e8", width=4),
+        showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(
+        x=[p25, p75], y=[0, 0],
+        mode="lines", line=dict(color="#185fa5", width=14),
+        showlegend=False,
+        hovertemplate=f"p25: {p25:,.0f} EUR<br>p75: {p75:,.0f} EUR<extra></extra>"))
+    fig.add_trace(go.Scatter(
+        x=[med], y=[0], mode="markers",
+        marker=dict(color="white", size=12, line=dict(color="#0b3a66", width=2)),
+        showlegend=False,
+        hovertemplate=f"Median: {med:,.0f} EUR<extra></extra>"))
+    # End-cap markers + small text labels for min and max of displayed range
+    fig.add_trace(go.Scatter(
+        x=[lo_disp, hi_disp], y=[0, 0], mode="markers",
+        marker=dict(color="#7aa3c9", size=8, symbol="line-ns",
+                    line=dict(width=2, color="#7aa3c9")),
+        showlegend=False, hoverinfo="skip"))
+    annotations = [
+        dict(x=lo_disp, y=0.7, text=f"{lo_disp:,.0f} EUR",
+             showarrow=False, font=dict(size=10, color="#666"), xanchor="left"),
+        dict(x=hi_disp, y=0.7, text=f"{hi_disp:,.0f} EUR",
+             showarrow=False, font=dict(size=10, color="#666"), xanchor="right"),
+        dict(x=med, y=-0.9, text=f"Median {med:,.0f}",
+             showarrow=False, font=dict(size=10, color="#0b3a66")),
+    ]
+    if target_price is not None and target_price > 0:
+        fig.add_trace(go.Scatter(
+            x=[target_price], y=[0], mode="markers",
+            marker=dict(color="#c0392b", size=14, symbol="diamond",
+                        line=dict(width=1, color="white")),
+            showlegend=False,
+            hovertemplate=f"Ihr Preis: {target_price:,.0f} EUR<extra></extra>"))
+        annotations.append(dict(
+            x=target_price, y=0.9, text=f"Ihr Preis {target_price:,.0f}",
+            showarrow=False, font=dict(size=10, color="#c0392b")))
+    fig.update_layout(
+        height=90, margin=dict(t=20, b=20, l=10, r=10),
+        xaxis=dict(visible=False, range=[
+            min(lo_disp, target_price or lo_disp) * 0.95,
+            max(hi_disp, target_price or hi_disp) * 1.05]),
+        yaxis=dict(visible=False, range=[-1.5, 1.5]),
+        annotations=annotations,
+        plot_bgcolor="white", paper_bgcolor="white")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _directional_caveat(offers, user_key, broader_median):
+    """
+    Compute whether the user's Abschluss is typically priced higher or lower
+    than the broader fallback pool, using the FULL HuW dataset (not the search
+    results). Returns a German sentence or None.
+    """
+    hw = _hw_priced(offers)
+    if hw is None or user_key is None:
+        return None
+    hw_key = hw["degree"].map(canonical_abschluss)
+    sub = hw[hw_key == user_key]
+    if len(sub) < 30:
+        return None
+    abschluss_median = float(pd.to_numeric(sub["price"], errors="coerce").dropna().median())
+    label = _ABSCHLUSS_LABEL.get(user_key, "diese Abschlüsse")
+    # Use ±15% as the band for "roughly equal"
+    if broader_median <= 0:
+        return None
+    ratio = abschluss_median / broader_median
+    if ratio > 1.15:
+        return (f"_Hinweis:_ {label}-Programme sind im Schnitt teurer als die "
+                "breitere Vergleichsbasis — der tatsächliche Marktwert dürfte "
+                "**oberhalb** dieser Zahlen liegen.")
+    if ratio < 0.85:
+        return (f"_Hinweis:_ {label}-Programme sind im Schnitt günstiger als die "
+                "breitere Vergleichsbasis — der tatsächliche Marktwert dürfte "
+                "**unterhalb** dieser Zahlen liegen.")
+    return None
+
+
+def _abschluss_counts(matched_priced):
+    """For State B: per-Abschluss breakdown of the broader pool."""
+    if matched_priced is None or len(matched_priced) == 0:
+        return {}
+    keys = matched_priced["degree"].map(canonical_abschluss)
+    counts = {}
+    for k in keys:
+        if k:
+            counts[k] = counts.get(k, 0) + 1
+    return counts
+
+
+def _format_counts(counts):
+    parts = []
+    for k in ("master", "bachelor", "zertifikat", "ohne_abschluss"):
+        if counts.get(k):
+            parts.append(f"{counts[k]} {_ABSCHLUSS_LABEL[k]}")
+    return ", ".join(parts) if parts else "—"
+
+
+def _parse_ects_median(sub):
+    """
+    Placeholder for a future length-adjustment supplement. The HuW 'umfang'
+    field uses Semester/Stunden/Tage/Monate, not ECTS literals, so a proper
+    implementation requires unit conversion (e.g. price per Semester). Kept
+    as a stub returning None until that work is done.
+    """
+    return None
+
+
+def render_vergleichskurse(offers, matched, user_degree, target_price=None):
+    """
+    Search-derived comparable-course readout with 3-state fallback:
+      A: chosen Abschluss has >=10 comparables -> full treatment.
+      B: <10 in chosen Abschluss, broader pool >=10 -> broader pool + caveat.
+      C: broader pool <10 -> 'unique market' framing.
+    """
+    st.markdown("#### Vergleichskurse")
+    priced_all = matched[
+        (matched["source"] == "hochundweit") &
+        matched["price"].notna() &
+        (matched["price"] > 0)
+    ] if matched is not None and len(matched) > 0 else None
+
+    if priced_all is None or len(priced_all) == 0:
+        st.info("Bitte Kurstitel und Beschreibung eingeben, um vergleichbare Kurse zu finden.")
+        return
+
+    user_key = canonical_abschluss(user_degree)
+    user_label = _ABSCHLUSS_LABEL.get(user_key, user_degree or "")
+    keys = priced_all["degree"].map(canonical_abschluss)
+    segment = priced_all[keys == user_key] if user_key else priced_all.iloc[0:0]
+    n_segment = len(segment)
+    n_broader = len(priced_all)
+
+    # State C: not enough even in the broader pool
+    if n_broader < 10:
+        counts = _abschluss_counts(priced_all)
+        st.markdown(
+            f"**Vergleichsbasis zu dünn ({n_broader} vergleichbare Kurse gefunden).** "
+            "Das ist ein gutes Zeichen — Sie planen offenbar ein wenig besetztes "
+            "Angebot. Der Preis lässt sich strategisch setzen, nicht aus dem "
+            "Wettbewerb ableiten. Nutzen Sie die *Marktorientierung* oben als Anker."
+        )
+        if counts:
+            st.caption(f"Davon: {_format_counts(counts)}.")
+        return
+
+    # State A vs B selection
+    if n_segment >= 10 and user_key is not None:
+        pool = segment
+        state = "A"
+    else:
+        pool = priced_all
+        state = "B"
+
+    p25, med, p75, n = _percentile_readout(pool["price"])
+
+    # Readout sentence
+    if state == "A":
+        st.markdown(
+            f"Vergleichbare **{user_label}**-Kurse (n={n}) kosten zwischen "
+            f"**{p25:,.0f} EUR** (p25) und **{p75:,.0f} EUR** (p75), "
+            f"Median **{med:,.0f} EUR**."
+        )
+    else:
+        counts = _abschluss_counts(priced_all)
+        seg_label = user_label if user_key else (user_degree or "Ihr Abschluss")
+        st.markdown(
+            f"Vergleichsbasis: **{n_broader} Kurse über alle Abschlüsse** "
+            f"(nur **{n_segment} reine {seg_label}-Vergleichskurse** — zu wenige "
+            f"für eine belastbare {seg_label}-Statistik). "
+            f"Median **{med:,.0f} EUR**, Spanne (p25–p75) "
+            f"**{p25:,.0f} – {p75:,.0f} EUR**."
+        )
+        st.caption(f"Davon: {_format_counts(counts)}.")
+        caveat = _directional_caveat(offers, user_key, med)
+        if caveat:
+            st.markdown(caveat)
+
+    # Target-price overlay sentence
+    if target_price is not None and target_price > 0 and n >= 5:
+        s = pd.to_numeric(pool["price"], errors="coerce").dropna()
+        s = s[s > 0]
+        pct = float((s < target_price).mean() * 100)
+        zone = "unteren" if pct < 33 else "mittleren" if pct < 67 else "oberen"
+        st.markdown(
+            f"Ihr geplanter Preis von **{target_price:,.0f} EUR** liegt im "
+            f"**{zone} Bereich** ({pct:.0f}. Perzentil)."
+        )
+
+    # Histogram of the pool
+    s = pd.to_numeric(pool["price"], errors="coerce").dropna()
+    s = s[s > 0]
+    # Clip x-axis to 5th–95th to avoid outlier distortion
+    x_lo = float(s.quantile(.05))
+    x_hi = float(s.quantile(.95))
+    if target_price:
+        x_hi = max(x_hi, float(target_price))
+        x_lo = min(x_lo, float(target_price))
+    fig = px.histogram(
+        s.clip(lower=x_lo, upper=x_hi), nbins=20,
+        labels={"value": "Preis (EUR)", "count": "Kurse"},
+        color_discrete_sequence=["#185fa5"], height=280,
+    )
+    fig.update_layout(
+        showlegend=False, bargap=0.05,
+        xaxis=dict(range=[x_lo, x_hi]),
+        margin=dict(t=20, b=40, l=10, r=10),
+        yaxis_title="Anzahl Kurse",
+    )
+    # Mark p25/median/p75 on x-axis
+    for value, name, color in [
+        (p25, "p25", "#7aa3c9"),
+        (med, "Median", "#0b3a66"),
+        (p75, "p75", "#7aa3c9"),
+    ]:
+        fig.add_vline(x=value, line_dash="dot", line_color=color, line_width=1.5,
+                      annotation_text=name, annotation_position="top",
+                      annotation_font_size=10, annotation_font_color=color)
+    if target_price is not None and target_price > 0:
+        fig.add_vline(x=target_price, line_color="#c0392b", line_width=2.5,
+                      annotation_text=f"Ihr Preis", annotation_position="top right",
+                      annotation_font_size=11, annotation_font_color="#c0392b")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Note: price-per-ECTS supplement was planned but the HuW 'umfang' field
+    # does not use ECTS literals (it's "Semester"/"Stunden"/"Tage"/"Monate"),
+    # so a proper length-adjustment supplement is a separate piece of work
+    # and is deliberately omitted here.
+
+    st.caption(
+        "Vergleichsbasis: hochundweit-Kurse, thematisch verwandt zu Ihrer Idee. "
+        "Nicht enthalten: mein-now-Daten — eigene Erhebung privater Marktpreise "
+        "für Welle 2 vorgesehen."
+    )
+
+
 def phase_3(offers, params, matched):
     section_header("#ede0f5", "5. Preisgestaltung")
     if st.session_state.get("_logged_p3") != params.get("user_text"):
@@ -1328,6 +1644,16 @@ def phase_3(offers, params, matched):
                   wissensgebiet=params.get("kg"),
                   session_id=st.session_state.get("_usage_sid"))
         st.session_state["_logged_p3"] = params.get("user_text")
+
+    # Optional target-price input (commit on blur via st.number_input)
+    tcol1, _ = st.columns([1, 3])
+    with tcol1:
+        _tp_raw = st.number_input(
+            "Optional: Ihr geplanter Preis (EUR)",
+            min_value=0, value=0, step=50,
+            help="Wenn Sie einen Preis eingeben, wird er in den Auswertungen unten als Marker angezeigt.")
+    target_price = _tp_raw if _tp_raw and _tp_raw > 0 else None
+
     priced_all = matched[
     (matched["source"] == "hochundweit") &
     matched["price"].notna() &
@@ -1430,44 +1756,9 @@ def phase_3(offers, params, matched):
 
         st.write("---")
 
-    st.subheader("Marktpreise ähnlicher Kurse")
-    if priced_all is not None and len(priced_all) >= 3:
-        p25 = priced_all["price"].quantile(.25)
-        med = priced_all["price"].median()
-        p75 = priced_all["price"].quantile(.75)
-
-        # Clip y-axis to avoid outlier distortion: show ±2.5×IQR around median
-        iqr = p75 - p25
-        y_lo = max(0, p25 - iqr * 1.5)
-        y_hi = min(priced_all["price"].max(), p75 + iqr * 2.5)
-
-        fig_mkt = px.box(priced_all, y="price", points="outliers",
-            title="Preisverteilung ähnlicher Kurse",
-            labels={"price":"Preis (EUR)"},
-            color_discrete_sequence=["#185fa5"], height=300)
-        fig_mkt.update_yaxes(range=[y_lo, y_hi])
-        if has_cost:
-            fig_mkt.add_hline(y=be_preis, line_dash="dash", line_color="#c0392b",
-                              annotation_text="Ihr Break-even",
-                              annotation_position="top right")
-        fig_mkt.update_layout(margin=dict(t=50,b=10))
-        st.plotly_chart(fig_mkt, use_container_width=True)
-
-        col1,col2,col3,col4 = st.columns(4)
-        col1.metric("25. Perz.",        f"{p25:,.0f} EUR")
-        col2.metric("Median",           f"{med:,.0f} EUR")
-        col3.metric("75. Perz.",        f"{p75:,.0f} EUR")
-        col4.metric("Empfohlene Spanne",f"{p25:,.0f} – {p75:,.0f} EUR")
-
-        if has_cost:
-            if be_preis < p25:
-                st.success(f"Ihr Break-even ({be_preis:,.0f} EUR) liegt unter dem 25. Perzentil — gute Spielräume.")
-            elif be_preis < med:
-                st.info(f"Ihr Break-even ({be_preis:,.0f} EUR) liegt im unteren Marktbereich.")
-            else:
-                st.warning(f"Ihr Break-even ({be_preis:,.0f} EUR) liegt über dem Marktmedian — Kostensenkung prüfen.")
-    else:
-        st.info("Bitte Kurstitel und Beschreibung eingeben, um Marktpreise zu berechnen.")
+    render_marktorientierung(offers, params.get("degree"), target_price=target_price)
+    st.write("")
+    render_vergleichskurse(offers, matched, params.get("degree"), target_price=target_price)
 
 def feedback_section():
     st.write("---")
@@ -1550,23 +1841,9 @@ Der Deckungsbeitrags-Chart zeigt Ihren Break-even sowie die Marktpreise ähnlich
 
 ---
         """)
-        with st.expander("Datenschutz & Nutzungsstatistik"):
-            st.markdown(
-                "Dieses Werkzeug erfasst **anonyme Nutzungsereignisse** "
-                "(z. B. welche Analyseschritte aufgerufen werden), um das Tool "
-                "zu verbessern. Dabei werden **keine personenbezogenen Daten** "
-                "und **keine Ihrer Eingaben** (Kurstitel, Beschreibung) "
-                "gespeichert. Es werden keine Cookies gesetzt. Erfasst werden "
-                "ausschließlich: Datum (tagesgenau), die Art des Ereignisses "
-                "sowie die gewählte Kategorie (Abschluss, Wissensgebiet)."
-            )
         st.caption("Version 1.0 · TH Wildau 2025")
 
     st.title("Weiterbildungs-Radar")
-    _sid = get_session_id(st.session_state)
-    if not st.session_state.get("_logged_open"):
-        log_event("app_open", session_id=_sid)
-        st.session_state["_logged_open"] = True
     st.markdown(
         "Analysieren Sie Angebot, Nachfrage und Preisgestaltung für Ihre Weiterbildungsidee. "
         "Geben Sie Ihren Kurstitel und eine kurze Beschreibung ein — das Werkzeug führt Sie "
@@ -1614,12 +1891,6 @@ Kalkulation realistisch ist.
     params = phase_0(kgs)
 
     if params["user_text"].strip():
-        if st.session_state.get("_logged_query") != params["user_text"]:
-            log_event("search_run",
-                      abschluss=params.get("degree"),
-                      wissensgebiet=params.get("kg"),
-                      session_id=st.session_state.get("_usage_sid"))
-            st.session_state["_logged_query"] = params["user_text"]
         st.write("---")
         matched = phase_1(offers, params)
         st.write("---")
@@ -1641,10 +1912,6 @@ Kalkulation realistisch ist.
             type="primary",
             use_container_width=False,
         ):
-            log_event("export_click",
-                      abschluss=params.get("degree"),
-                      wissensgebiet=params.get("kg"),
-                      session_id=st.session_state.get("_usage_sid"))
             st.session_state.radar_params = params
             st.switch_page("pages/1_Angebotsbeschreibung.py")
     else:
