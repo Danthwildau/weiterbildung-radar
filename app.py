@@ -284,7 +284,7 @@ def _token_overlap(qtoks, comp_name):
 @st.cache_resource(show_spinner=False)
 def build_comp_index(comp_demand_path: str):
     from sklearn.feature_extraction.text import TfidfVectorizer
-    names = pd.read_parquet(comp_demand_path)["competency_name"].dropna().unique()
+    names = pd.read_parquet(comp_demand_path, columns=["competency_name"])["competency_name"].dropna().unique()
     vec   = TfidfVectorizer(min_df=1, ngram_range=(1,2), sublinear_tf=True,
                             stop_words=list(_COMP_STOP))
     mat   = vec.fit_transform(names)
@@ -583,10 +583,16 @@ def load_offers():
 @st.cache_data
 def load_demand():
     df = pd.read_parquet(DATA/"demand_latest.parquet")
-    df["kldb_id"] = df["kldb_id"].astype(int)
+    df["kldb_id"] = pd.to_numeric(df["kldb_id"].astype(int), downcast="integer")
     for col in ("region", "nuts_id", "bundesland_nuts", "beruf_name"):
         if col in df.columns:
             df[col] = df[col].astype("category")
+    for col in ("total_jobs", "total_diff_previous_year", "nuts_level"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], downcast="integer")
+    if "percentage_diff_previous_year" in df.columns:
+        df["percentage_diff_previous_year"] = pd.to_numeric(
+            df["percentage_diff_previous_year"], downcast="float")
     return df
 
 @st.cache_data
@@ -602,10 +608,22 @@ def load_competency_demand():
     path = DATA / "competency_demand.parquet"
     if not path.exists():
         return pd.DataFrame()
-    df = pd.read_parquet(path)
-    for col in ("region", "nuts_id", "bundesland_nuts"):
+    # Only load the columns the app actually uses, to keep the ~1.9M-row frame
+    # within the memory budget. Filtering is on nuts_id; aggregation is by
+    # competency_name. region/competency_type/etc. are not needed at runtime.
+    used = ["competency_name", "nuts_id", "total_jobs", "weighted_jobs",
+            "n_professions", "avg_growth", "demand_score"]
+    df = pd.read_parquet(path, columns=used)
+    for col in ("competency_name", "nuts_id"):
         if col in df.columns:
             df[col] = df[col].astype("category")
+    # Downcast numerics (int64->int32/int16, float64->float32) to halve footprint
+    for col in ("total_jobs", "n_professions"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], downcast="integer")
+    for col in ("weighted_jobs", "avg_growth", "demand_score"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], downcast="float")
     return df
 
 
