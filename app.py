@@ -11,6 +11,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from usage_logger import log_event, get_session_id
+from nuts_regions import build_lookup, resolve_catchment, catchment_label, DEFAULT_CATCHMENT
 
 warnings.filterwarnings("ignore")
 
@@ -283,20 +284,20 @@ def _token_overlap(qtoks, comp_name):
 @st.cache_resource(show_spinner=False)
 def build_comp_index(comp_demand_path: str):
     from sklearn.feature_extraction.text import TfidfVectorizer
-    names = pd.read_csv(comp_demand_path)["competency_name"].dropna().unique()
+    names = pd.read_parquet(comp_demand_path)["competency_name"].dropna().unique()
     vec   = TfidfVectorizer(min_df=1, ngram_range=(1,2), sublinear_tf=True,
                             stop_words=list(_COMP_STOP))
     mat   = vec.fit_transform(names)
     return vec, mat, names
 
-def suggest_comps_for_query(query, comp_demand, top_n=15):
+def suggest_comps_for_query(query, comp_demand, catchment_codes, top_n=15):
     from sklearn.metrics.pairwise import cosine_similarity
     import numpy as _np
     if not query.strip(): return pd.DataFrame()
     expanded = _expand_comp_query(query)
     qtoks    = _comp_qtokens(expanded)
     if not qtoks: return pd.DataFrame()
-    vec, mat, names = build_comp_index(str(DATA/"competency_demand.csv"))
+    vec, mat, names = build_comp_index(str(DATA/"competency_demand.parquet"))
     sims = cosine_similarity(vec.transform([expanded]), mat)[0]
     rows = []
     for i in _np.argsort(sims)[::-1][:top_n*8]:
@@ -305,7 +306,7 @@ def suggest_comps_for_query(query, comp_demand, top_n=15):
         if _token_overlap(qtoks, name) < 0.12: continue
         local = comp_demand[
             comp_demand["competency_name"].eq(name) &
-            comp_demand["region"].isin(["Dahme-Spreewald","Oder-Spree","Teltow-Fläming","Berlin"])
+            comp_demand["nuts_id"].isin(catchment_codes)
         ]
         rows.append({"competency_name":name, "sim":round(float(sims[i]),3),
                      "avg_growth": local["avg_growth"].mean() if not local.empty else None,
@@ -347,9 +348,6 @@ def tfidf_search(user_text, vectorizer, matrix, ids, offers_df, params=None, top
     for i, r in enumerate(offers_df.itertuples(index=False)):
         b = 0.0
         if r.source == "hochundweit":  b += 0.04
-        geo = str(getattr(r,"geo_tier","") or "")
-        if geo == "wildau":            b += 0.08
-        elif geo == "berlin_bb":       b += 0.04
         mode = str(getattr(r,"delivery_mode","") or "")
         if mode == user_delivery:      b += 0.05
         elif user_delivery in ("hybrid_location","in_person") and mode in ("hybrid_location","in_person"):
@@ -397,14 +395,6 @@ def hf_rerank(query: str, candidate_texts: tuple) -> list:
         return out
     except Exception:
         return []
-
-REGIONS_DISPLAY = {
-    "TH Wildau Region": ["Dahme-Spreewald","Oder-Spree","Teltow-Fläming"],
-    "Berlin":           ["Berlin"],
-    "Brandenburg":      ["Brandenburg"],
-    "Deutschland":      ["Deutschland"],
-}
-REGION_ORDER = ["TH Wildau Region","Berlin","Brandenburg","Deutschland"]
 
 CAT_COLS = ["PGT_effektive_Verwaltung","PGT_effektive_Verwaltung_oeffentlich",
             "PGT_zukunftsfaehige_Mobilitaet","PGT_nachhaltige_Wertschoepfung",
@@ -592,8 +582,11 @@ def load_offers():
 
 @st.cache_data
 def load_demand():
-    df = pd.read_csv(DATA/"demand_2025.csv")
+    df = pd.read_parquet(DATA/"demand_latest.parquet")
     df["kldb_id"] = df["kldb_id"].astype(int)
+    for col in ("region", "nuts_id", "bundesland_nuts", "beruf_name"):
+        if col in df.columns:
+            df[col] = df[col].astype("category")
     return df
 
 @st.cache_data
@@ -606,12 +599,20 @@ def load_berufe():
 
 @st.cache_data
 def load_competency_demand():
-    path = DATA / "competency_demand.csv"
+    path = DATA / "competency_demand.parquet"
     if not path.exists():
         return pd.DataFrame()
-    df = pd.read_csv(path)
-    df["kldb_id"] = df.get("kldb_id", pd.Series(dtype=str))
+    df = pd.read_parquet(path)
+    for col in ("region", "nuts_id", "bundesland_nuts"):
+        if col in df.columns:
+            df[col] = df[col].astype("category")
     return df
+
+
+@st.cache_data
+def load_nuts_lookup():
+    """Build the NUTS code<->name lookup once from the demand data."""
+    return build_lookup(load_demand())
 
 @st.cache_data
 def load_competency_summary():
@@ -716,37 +717,40 @@ def angebots_score(n):
     if n<=40:  return 3,"Starkes Angebot — Nische oder USP wichtig."
     return 1,"Sehr gesättigter Markt — Positionierung entscheidend."
 
-def nachfrage_score(demand, kldb_ids, region_names):
+def nachfrage_score(demand, kldb_ids, catchment_codes):
     """
-    Weighted score: local (TH Wildau) = 3×, Berlin/BB = 2×, national = 1×.
+    Unweighted demand score over the selected catchment (NUTS-3/region codes).
+    Filtering is on nuts_id, never on region names. National ('DE') figures are
+    reported as a separate context line, not folded into the score.
     """
-    LOCAL  = ["Dahme-Spreewald","Oder-Spree","Teltow-Fläming"]
-    BB     = ["Berlin","Brandenburg"]
-    weights = {r: 3 for r in LOCAL}
-    weights.update({r: 2 for r in BB})
+    sub = demand[demand["kldb_id"].isin(kldb_ids) & demand["nuts_id"].isin(catchment_codes)]
+    if sub.empty:
+        return 1, "Keine Nachfragedaten für diese Berufe in der gewählten Region."
 
-    sub = demand[demand["kldb_id"].isin(kldb_ids) & demand["region"].isin(region_names)]
-    if sub.empty: return 1,"Keine Nachfragedaten für diese Berufe."
-
-    sub = sub.copy()
-    sub["_w"] = sub["region"].map(lambda r: weights.get(r, 1))
-
-    # Weighted median growth
-    rows_w = []
-    for _, row in sub.iterrows():
-        rows_w.extend([row["percentage_diff_previous_year"]] * int(row["_w"]))
-    rows_w = [x for x in rows_w if pd.notna(x)]
-    if not rows_w: return 3,"Unzureichende Daten."
-
-    rows_w.sort()
-    mg = rows_w[len(rows_w)//2]
-    tj = (sub["total_jobs"] * sub["_w"]).sum() / sub["_w"].sum()  # weighted avg
+    # Median growth (unweighted) across the catchment rows
+    growth = sub["percentage_diff_previous_year"].dropna().tolist()
+    if not growth:
+        return 3, "Unzureichende Daten."
+    growth.sort()
+    mg = growth[len(growth)//2]
+    tj = sub["total_jobs"].mean()
 
     gs = min(10, max(1, int((mg*100+5)*1.2)))
-    sb = min(2, math.log10(max(tj,1))/3)
+    sb = min(2, math.log10(max(tj, 1))/3)
     f  = min(10, max(1, round(gs+sb)))
-    trend = "wachsend" if mg>0.05 else "stabil" if mg>-0.05 else "rückläufig"
-    return f, f"Trend: {trend}  ·  Wachstum (gewichtet): {mg*100:+.1f}%  ·  Stellen: {int(sub['total_jobs'].sum()):,}"
+    trend = "wachsend" if mg > 0.05 else "stabil" if mg > -0.05 else "rückläufig"
+
+    # National context (separate line, not part of the score)
+    nat = demand[demand["kldb_id"].isin(kldb_ids) & demand["nuts_id"].eq("DE")]
+    nat_txt = ""
+    if not nat.empty:
+        nat_g = nat["percentage_diff_previous_year"].dropna()
+        if len(nat_g):
+            nat_mg = nat_g.median()
+            nat_txt = f"  ·  national: {nat_mg*100:+.1f}%, {int(nat['total_jobs'].sum()):,} Stellen"
+
+    return f, (f"Trend: {trend}  ·  Wachstum: {mg*100:+.1f}%  ·  "
+               f"Stellen: {int(sub['total_jobs'].sum()):,}{nat_txt}")
 
 # ─── SECTIONS ────────────────────────────────────────────────────────────
 
@@ -760,6 +764,64 @@ def section_header(color_hex, label):
 def phase_0(kgs):
     # ── Kursbeschreibung ──────────────────────────────────────────────
     section_header("#dceefb", "1. Eckdaten zum Angebot")
+
+    # ── Einzugsgebiet (catchment) picker ─────────────────────────────
+    lookup = load_nuts_lookup()
+    if "catchment_codes" not in st.session_state:
+        st.session_state.catchment_codes = list(DEFAULT_CATCHMENT)
+
+    with st.expander("Einzugsgebiet (Region für die Nachfrageanalyse)", expanded=False):
+        st.caption(
+            "Wählen Sie das Einzugsgebiet kaskadierend: Bundesland → "
+            "Regierungsbezirk → Landkreis/kreisfreie Stadt. Leer = ganze Ebene. "
+            "Die Nachfrage wird ausschließlich über NUTS-Codes gefiltert."
+        )
+        bl_opts = [c for c, _ in lookup["bundeslaender"]]
+        bl_default = [c for c in st.session_state.catchment_codes if len(c) == 3]
+        sel_bl = st.multiselect(
+            "Bundesland", options=bl_opts,
+            default=[c for c in bl_default if c in bl_opts],
+            format_func=lambda c: lookup["code_to_name"].get(c, c), key="pick_bl")
+
+        # NUTS-2 options constrained to selected Bundesländer (if any)
+        n2_all = lookup["nuts2"]
+        n2_opts = [c for c, _, bl in n2_all if (not sel_bl or bl in sel_bl)]
+        n2_names = {c: n for c, n, _ in n2_all}
+        sel_n2 = st.multiselect(
+            "Regierungsbezirk (NUTS-2)", options=n2_opts,
+            default=[c for c in st.session_state.catchment_codes if c in n2_opts],
+            format_func=lambda c: n2_names.get(c, c), key="pick_n2")
+
+        # Landkreis options constrained to selected NUTS-2, else selected Bundesländer
+        lk_all = lookup["landkreise"]  # (code, name, nuts2_prefix, bundesland_code)
+        if sel_n2:
+            lk_opts = [(c, n) for c, n, n2, bl in lk_all if n2 in sel_n2]
+        elif sel_bl:
+            lk_opts = [(c, n) for c, n, n2, bl in lk_all if bl in sel_bl]
+        else:
+            lk_opts = [(c, n) for c, n, n2, bl in lk_all]
+        lk_codes = [c for c, _ in lk_opts]
+        lk_names = dict(lk_opts)
+        sel_lk = st.multiselect(
+            "Landkreis / kreisfreie Stadt", options=lk_codes,
+            default=[c for c in st.session_state.catchment_codes if c in lk_codes],
+            format_func=lambda c: lk_names.get(c, c), key="pick_lk")
+
+        # Build raw catchment codes: most specific selections win.
+        # Keep a Bundesland/NUTS-2 only if no finer selection narrows it.
+        catchment_codes = []
+        catchment_codes += list(sel_lk)
+        covered_n2 = {c[:4] for c in sel_lk}
+        catchment_codes += [c for c in sel_n2 if c not in covered_n2]
+        covered_bl = {c[:3] for c in sel_lk} | {c[:3] for c in sel_n2}
+        catchment_codes += [c for c in sel_bl if c not in covered_bl]
+
+        if not catchment_codes:
+            catchment_codes = list(DEFAULT_CATCHMENT)
+            st.caption(f"Keine Auswahl — Standard: {catchment_label(catchment_codes, lookup)}")
+        st.session_state.catchment_codes = catchment_codes
+        st.markdown(f"**Aktuelles Einzugsgebiet:** {catchment_label(catchment_codes, lookup)}")
+
     with st.container():
         c1, c2 = st.columns([3,2])
         with c1:
@@ -810,6 +872,7 @@ def phase_0(kgs):
             "user_text":f"{title} {description} {keywords}".strip(),
             "kg":kg if kg!="(bitte wählen)" else "",
             "selected_cats":selected_cats,"format":fmt,"degree":degree,
+            "catchment_codes":st.session_state.get("catchment_codes", list(DEFAULT_CATCHMENT)),
             "ects":ects,"hours":hours,"months":months,"target_tn":target_tn,
             "dev_h":dev_h,"dev_rate":dev_rate,"impl_h":impl_h,
             "impl_rate":impl_rate,"sachkosten":sachkosten,"overhead":overhead}
@@ -1041,6 +1104,10 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
         st.info("Bitte Kurstitel und Beschreibung in Schritt 1 eingeben.")
         return []
 
+    lookup = load_nuts_lookup()
+    catchment_codes = resolve_catchment(
+        params.get("catchment_codes") or list(DEFAULT_CATCHMENT), demand, lookup)
+
     # ── STEP A: Competency suggestions ───────────────────────────────────
     st.markdown("#### Welche Kompetenzen vermittelt Ihr Kurs?")
 
@@ -1048,7 +1115,7 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
         st.warning("Kompetenz-Daten nicht verfügbar.")
         suggested_df = pd.DataFrame()
     else:
-        suggested_df = suggest_comps_for_query(user_text, comp_demand, top_n=15)
+        suggested_df = suggest_comps_for_query(user_text, comp_demand, catchment_codes, top_n=15)
 
     if "selected_comps" not in st.session_state:
         st.session_state.selected_comps = set()
@@ -1086,7 +1153,7 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
         st.write("")
         local = comp_demand[
             comp_demand["competency_name"].isin(selected) &
-            comp_demand["region"].isin(["Dahme-Spreewald","Oder-Spree","Teltow-Fläming","Berlin"])
+            comp_demand["nuts_id"].isin(catchment_codes)
         ]
         if not local.empty:
             avg_g  = local["avg_growth"].mean()
@@ -1158,7 +1225,7 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
                 growth_str = ""
                 if kldb:
                     ds = demand[(demand["kldb_id"]==kldb) &
-                                demand["region"].isin(["Berlin","Brandenburg"])]
+                                demand["nuts_id"].isin(catchment_codes)]
                     if not ds.empty:
                         g = ds["percentage_diff_previous_year"].mean()
                         growth_str = f"{g*100:+.1f}%"
@@ -1204,31 +1271,34 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
         st.warning("Keine Nachfragedaten für diese Berufsgruppen.")
         return all_kldb
 
-    all_regions = (REGIONS_DISPLAY["TH Wildau Region"] + REGIONS_DISPLAY["Berlin"] +
-                   REGIONS_DISPLAY["Brandenburg"] + REGIONS_DISPLAY["Deutschland"])
-    nd_score, nd_text = nachfrage_score(demand_sub, all_kldb, all_regions)
+    nd_score, nd_text = nachfrage_score(demand_sub, all_kldb, catchment_codes)
 
     col_sc2, col_info2 = st.columns([1,3])
     with col_sc2:
         score_badge(nd_score, nd_text)
     with col_info2:
-        st.caption("Score 10 = stark wachsende lokale Nachfrage  ·  Score 1 = sinkend oder gering")
-        st.caption("Lokale Nachfrage (TH Wildau Region) wird dreifach, Berlin/BB zweifach gewichtet.")
+        st.caption("Score 10 = stark wachsende Nachfrage im Einzugsgebiet  ·  Score 1 = sinkend oder gering")
+        st.caption(f"Einzugsgebiet: {catchment_label(params.get('catchment_codes') or DEFAULT_CATCHMENT, lookup)}  ·  national als Kontext.")
 
-    # Regional chart
+    # Regional chart: catchment (aggregated) vs Deutschland (nuts_id 'DE')
     rrows = []
-    for dname, db_regs in REGIONS_DISPLAY.items():
-        sub = demand_sub[demand_sub["region"].isin(db_regs)]
-        if sub.empty: continue
-        total = sub["total_jobs"].sum()
-        diff  = sub["total_diff_previous_year"].sum()
+    cat_sub = demand_sub[demand_sub["nuts_id"].isin(catchment_codes)]
+    if not cat_sub.empty:
+        total = cat_sub["total_jobs"].sum()
+        diff  = cat_sub["total_diff_previous_year"].sum()
         prior = total - diff
         pct   = diff / prior if prior > 0 else 0
-        rrows.append({"Region":dname,"Stellenausschreibungen":int(total),"Wachstum_%":round(pct*100,1)})
+        rrows.append({"Region":"Einzugsgebiet","Stellenausschreibungen":int(total),"Wachstum_%":round(pct*100,1)})
+    de_sub = demand_sub[demand_sub["nuts_id"].eq("DE")]
+    if not de_sub.empty:
+        total = de_sub["total_jobs"].sum()
+        diff  = de_sub["total_diff_previous_year"].sum()
+        prior = total - diff
+        pct   = diff / prior if prior > 0 else 0
+        rrows.append({"Region":"Deutschland","Stellenausschreibungen":int(total),"Wachstum_%":round(pct*100,1)})
 
     if rrows:
         rdf = pd.DataFrame(rrows)
-        rdf = rdf.set_index("Region").reindex(REGION_ORDER).dropna().reset_index()
         colors = rdf["Wachstum_%"].apply(lambda x: "#27ae60" if x>5 else "#f39c12" if x>-5 else "#c0392b")
         fig = go.Figure(go.Bar(
             x=rdf["Region"], y=rdf["Wachstum_%"],
@@ -1243,8 +1313,8 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
                      .rename(columns={"Wachstum_%":"Wachstum (%)"}),
                      use_container_width=True, hide_index=True)
 
-    st.markdown("**Top Berufe nach Wachstum — Berlin & Brandenburg**")
-    top = (demand_sub[demand_sub["region"].isin(["Berlin","Brandenburg"])]
+    st.markdown("**Top Berufe nach Wachstum — Einzugsgebiet**")
+    top = (demand_sub[demand_sub["nuts_id"].isin(catchment_codes)]
            .groupby(["kldb_id","beruf_name"], as_index=False)
            .agg(Stellen=("total_jobs","sum"),
                 Wachstum_pct=("percentage_diff_previous_year","mean"))
@@ -1273,9 +1343,7 @@ def phase_2(berufe_df, demand, params, comp_demand=None, comp_map=None):
                     .agg(agg_score=("weight","sum"), n_professions=("kldb_id","nunique"))
                     .sort_values("agg_score", ascending=False).head(40))
                 comp_with_demand = top_comps.merge(
-                    comp_demand[comp_demand["region"].isin(
-                        ["Dahme-Spreewald","Oder-Spree","Teltow-Fläming","Berlin"]
-                    )].groupby("competency_name", as_index=False).agg(
+                    comp_demand[comp_demand["nuts_id"].isin(catchment_codes)].groupby("competency_name", as_index=False).agg(
                         total_jobs=("total_jobs","sum"),
                         avg_growth=("avg_growth","mean"),
                         demand_score=("demand_score","mean"),
